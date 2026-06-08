@@ -29,6 +29,28 @@ PTYPE_LABEL = {"D": "detached", "S": "semi-detached", "T": "terraced", "F": "fla
 _DEFAULT_WINDOW = {"month": relativedelta(months=24), "quarter": relativedelta(years=8),
                    "year": relativedelta(years=30)}
 
+# Whole-country/region names that are NOT a single area the area-scoped tools handle.
+# When the LLM passes one of these (e.g. "in the UK"), redirect it to the right tool
+# instead of silently returning empty data.
+_COUNTRY_TERMS = {"UK", "U.K.", "THE UK", "UNITED KINGDOM", "ENGLAND", "WALES",
+                  "ENGLAND AND WALES", "GREAT BRITAIN", "BRITAIN", "GB",
+                  "NATIONWIDE", "ANYWHERE"}
+
+
+def _is_country(area) -> bool:
+    return bool(area) and str(area).strip().upper() in _COUNTRY_TERMS
+
+
+def _country_guard(area):
+    """Return a redirecting error dict if `area` is a whole country/region, else None."""
+    if _is_country(area):
+        return {"error": f"'{area}' is a whole country/region, not a single area this tool handles. "
+                         "For nationwide budget / 'best value' / cheapest questions use "
+                         "find_affordable_areas (area_scope='all'); to rank or screen areas use "
+                         "rank_areas; otherwise pass a specific county (e.g. KENT) or London "
+                         "borough (e.g. BEXLEY)."}
+    return None
+
 
 def _area_where(area_level: str, param: str = "area") -> str:
     if area_level == "county":
@@ -130,6 +152,9 @@ async def get_area_trend(conn, area, area_level="auto", date_from=None, date_to=
                          granularity="month", property_type="all", tenure="all",
                          new_build="all", metric="median", include_incomplete=False):
     """Time series of median/mean/count for one area + segment over a date range."""
+    guard = _country_guard(area)
+    if guard:
+        return guard
     if granularity not in GRANULARITY:
         granularity = "month"
     if metric not in {"median", "mean", "count"}:
@@ -172,6 +197,9 @@ async def get_area_trend(conn, area, area_level="auto", date_from=None, date_to=
 
 async def get_area_profile(conn, area, area_level="auto", as_of=None):
     """Latest snapshot for one area: headline median, MoM/YoY, breakdown by property type."""
+    guard = _country_guard(area)
+    if guard:
+        return guard
     lcm = await _last_complete_month(conn)
     month = _month_first(_parse_date(as_of, lcm or date.today()))
     where_area = _area_where(area_level)
@@ -208,6 +236,10 @@ async def get_area_profile(conn, area, area_level="auto", as_of=None):
         mix = await cur.fetchone()
 
     total = mix["total"] if mix else 0
+    if not total:
+        return {"error": f"No transactions found for '{area}' — it may not be a known county or "
+                         "London borough (names match Land Registry, e.g. KENT, BEXLEY). For "
+                         "nationwide or budget/'best value' questions use find_affordable_areas."}
     pct = lambda n: round(100.0 * n / total, 1) if total else None
     mom = round(100.0 * (cur_med - prev_med) / prev_med, 1) if cur_med and prev_med else None
     yoy = round(100.0 * (cur_med - yoy_med) / yoy_med, 1) if cur_med and yoy_med else None
@@ -267,6 +299,10 @@ async def get_price_index(conn, areas, base_period, date_from=None, date_to=None
     'still below 2022 peak?' and 'recovered fastest after the dip?'."""
     if isinstance(areas, str):
         areas = [areas]
+    areas = [a for a in (areas or []) if not _is_country(a)]
+    if not areas:
+        return {"error": "Pass specific areas (counties or London boroughs), not a whole "
+                         "country/region. For nationwide budget questions use find_affordable_areas."}
     lcm = await _last_complete_month(conn)
     d_to = _parse_date(date_to, lcm or date.today())
     if not include_incomplete and lcm:
@@ -289,6 +325,10 @@ async def compare_areas(conn, areas, metric="median", months=12, property_type="
     """Side-by-side: start value, end value and % change over the last N months."""
     if isinstance(areas, str):
         areas = [areas]
+    areas = [a for a in (areas or []) if not _is_country(a)]
+    if not areas:
+        return {"error": "Pass specific areas (counties or London boroughs), not a whole "
+                         "country/region. For nationwide budget questions use find_affordable_areas."}
     if metric not in {"median", "mean"}:
         metric = "median"
     lcm = await _last_complete_month(conn)
@@ -452,6 +492,88 @@ async def get_market_movers(conn, change_type="yoy", direction="both", min_trans
     out["change_type"] = change_type
     out["note"] = "Compares the latest registered month vs prior month (MoM) / same month last year (YoY)."
     return out
+
+
+_PGROUP_SQL = {"house": "property_type IN ('D','S','T')", "flat": "property_type = 'F'",
+               "detached": "property_type = 'D'", "semi": "property_type = 'S'",
+               "terraced": "property_type = 'T'", "other": "property_type = 'O'"}
+
+
+async def find_affordable_areas(conn, budget, area_scope="london", county=None,
+                                property_type="any", tenure="any",
+                                min_transactions=100, limit=12):
+    """Given a BUDGET, find where it actually buys (and where it goes furthest = best value).
+    Per area: % of recent sales within budget (the budget's percentile = the value signal),
+    the median (and flat median), and whether the median fits. Filterable by property_type
+    (house = detached/semi/terraced, flat, or a specific type) and tenure (freehold/leasehold).
+    Uses ABSOLUTE price vs budget (NOT current-vs-peak). NB: Land Registry has no bedroom
+    count or floor area, so this CANNOT filter by bedrooms or compute £/m²."""
+    budget = int(budget)
+    lcm = await _last_complete_month(conn)
+    end = _month_first(lcm or date.today())
+    start = end - relativedelta(months=11)  # 12 complete months
+    params = {"budget": budget, "start": start, "end_excl": end + relativedelta(months=1),
+              "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 30))}
+    filters = []
+    pg = _PGROUP_SQL.get(property_type)
+    if pg:
+        filters.append(pg)
+    if tenure in ("freehold", "leasehold"):
+        filters.append("tenure = %(tenure)s")
+        params["tenure"] = "F" if tenure == "freehold" else "L"
+    seg = "".join(" AND " + f for f in filters)
+
+    if area_scope == "county":
+        if not county:
+            return {"error": "area_scope='county' requires a 'county' name"}
+        area_expr, area_level = "district", "'district'"
+        scope_filter = "UPPER(county) = UPPER(%(county)s) AND district IS NOT NULL"
+        params["county"] = county
+    elif area_scope == "all":
+        area_expr = "CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END"
+        area_level = "CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END"
+        scope_filter = "(UPPER(county) <> 'GREATER LONDON' OR district IS NOT NULL)"
+    else:  # 'london' (~ within the M25)
+        area_expr, area_level = "district", "'district'"
+        scope_filter = "UPPER(county) = 'GREATER LONDON' AND district IS NOT NULL"
+
+    sql = f"""
+        WITH base AS (
+            SELECT {area_expr} AS area, {area_level} AS area_level, price, property_type
+            FROM market_transactions
+            WHERE date >= %(start)s AND date < %(end_excl)s AND {scope_filter}{seg}
+        )
+        SELECT area, area_level, count(*)::int AS sales,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS median,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price) FILTER (WHERE property_type='F')::bigint AS median_flat,
+               round(100.0 * count(*) FILTER (WHERE price <= %(budget)s) / count(*), 1) AS pct_within_budget,
+               (percentile_cont(0.5) WITHIN GROUP (ORDER BY price) <= %(budget)s) AS median_within_budget
+        FROM base
+        GROUP BY area, area_level
+        HAVING count(*) >= %(min_tx)s
+        ORDER BY pct_within_budget DESC, median ASC
+        LIMIT %(limit)s
+    """
+    async with conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(sql, params)
+        rows = await cur.fetchall()
+    any_fit = any(r["median_within_budget"] for r in rows)
+    return {
+        "budget": budget, "area_scope": area_scope,
+        "property_type": property_type, "tenure": tenure,
+        "window": {"from": start.isoformat(), "to": end.isoformat()},
+        "any_area_median_within_budget": any_fit,
+        "note": (None if any_fit else
+                 "No area in this scope has a median at/below the budget — it only reaches the "
+                 "cheaper end (see pct_within_budget and median_flat). Consider cheaper property "
+                 "types, a wider area_scope, or areas outside this scope."),
+        "data_note": ("Land Registry has no bedroom count or floor area: results are NOT filtered "
+                      "by bedrooms and there is no £/m² value figure. 'pct_within_budget' is the "
+                      "budget's percentile for the chosen type+tenure (higher = your money buys a "
+                      "more typical/better home there = better value)."),
+        "results": rows,
+        "meta": {"last_complete_month": lcm.isoformat() if lcm else None},
+    }
 
 
 async def run_sql(conn, sql, max_rows=None):

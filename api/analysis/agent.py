@@ -42,8 +42,18 @@ Available tools:
 Rules:
 - Choose the single most useful next tool; prefer the typed tools over run_sql.
 - Area names match Land Registry values: counties like KENT, SURREY, WEST MIDLANDS; London boroughs like BEXLEY.
+- get_area_profile / get_area_trend / get_price_index / compare_areas need a SPECIFIC county or London
+  borough — NEVER a country/region ('UK', 'England', 'nationwide'). A question asking WHICH areas (best
+  value, cheapest, where to buy/afford) is a screen: use find_affordable_areas (budget) or rank_areas.
 - Only pass date parameters (date_from / date_to / base_period / as_of) that the user EXPLICITLY names.
   Otherwise omit them entirely — the tools default to the latest complete data. NEVER assume today's date.
+- BUDGET / "what can I afford" / "best value for money" / "cheapest under £X": use
+  find_affordable_areas (absolute price vs budget), NOT rank_areas (current_vs_peak_pct is price
+  drops, not affordability). Set area_scope by geography: 'london' for London / "within the M25";
+  'county' (+county) for a named county; 'all' for nationwide / "England" / "UK" / "anywhere".
+  Pass property_type ('house'/'flat' or a specific type) and tenure ('freehold'/'leasehold') only
+  when the user names them; otherwise leave them 'any'. There is NO bedroom or floor-area data —
+  you cannot filter by bedrooms or compute £/m².
 - Do not repeat a tool call already shown in the observations.
 - When you have enough numbers, return {{"final": true}}."""
 
@@ -55,6 +65,14 @@ Rules:
 - Cite the actual figures inline (area names, £ medians, transaction counts, % changes). Format like £330,000 and +4.2%.
 - Be concise: 1-4 sentences; use short bullets only when listing 3+ areas.
 - If the observations are empty or contain an error, say you couldn't retrieve the figures rather than guessing.
+- AFFORDABILITY: only call an area affordable / within budget if its median is at or below the user's
+  budget. If no area's median fits (any_area_median_within_budget=false), say so plainly — point to where
+  the budget reaches the most stock (highest pct_within_budget, e.g. cheaper flats) and/or suggest cheaper
+  property types or areas outside the scope. Never imply an over-budget area suits the budget.
+- NO BEDROOM / SIZE DATA: never claim results are filtered by number of bedrooms, and never report a
+  £/m² or price-per-bedroom figure — that data isn't in Land Registry. If the user asked for a bedroom
+  count or per-size value, give the budget/tenure/type answer you DO have and note that bedroom and
+  floor-area filtering isn't available yet (planned via EPC data).
 - {caveat}"""
 
 CAVEAT_ON = ("One or more figures cover a very recent month; HM Land Registry data is registered with a lag, "
