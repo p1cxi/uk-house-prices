@@ -31,7 +31,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_INSTALL_PLUGINS: ""
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SERVER_ROOT_URL: "https://prices.picxi.uk/grafana"
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3001/grafana}"
       POSTGRES_DB: ${POSTGRES_DB:-house_prices}
       POSTGRES_USER: ${POSTGRES_USER:-prices}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -107,7 +107,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-prices}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       TARGET_COUNTIES: ${TARGET_COUNTIES}
-      LLM_HOST: ${LLM_HOST:-http://192.168.10.11:8080}
+      LLM_HOST: ${LLM_HOST:-http://localhost:8080}
       LLM_MODEL: ${LLM_MODEL:-Qwen3-8B-Q4_K_M.gguf}
       AGENT_DB_USER: ${AGENT_DB_USER:-agent_ro}
       AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD}

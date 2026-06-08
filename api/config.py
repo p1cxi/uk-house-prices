@@ -10,7 +10,7 @@ DB_CONFIG = {
 
 # llama.cpp server (OpenAI-compatible API). LLM_HOST should point at the
 # server root; the client appends /v1/chat/completions.
-LLM_HOST = os.getenv('LLM_HOST', 'http://192.168.10.11:8080')
+LLM_HOST = os.getenv('LLM_HOST', 'http://localhost:8080')
 LLM_MODEL = os.getenv('LLM_MODEL', 'Qwen3-8B-Q4_K_M.gguf')
 
 # Dedicated least-privilege connection for the /ask analytics agent. Same host/db

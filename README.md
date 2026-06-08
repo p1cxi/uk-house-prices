@@ -63,7 +63,7 @@ GRAFANA_ADMIN_PASSWORD=admin_password_here
 TARGET_COUNTIES=ESSEX,HERTFORDSHIRE,KENT,SURREY,CAMBRIDGESHIRE
 
 # AI service configuration (optional) — llama.cpp OpenAI-compatible server
-LLM_HOST=http://192.168.10.11:8080
+LLM_HOST=http://localhost:8080
 LLM_MODEL=Qwen3-8B-Q4_K_M.gguf
 ```
 

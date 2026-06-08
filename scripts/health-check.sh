@@ -68,7 +68,7 @@ echo
 
 # Check the LLM server (llama.cpp) used by /summarise and /ask
 echo "🤖 LLM Server:"
-LLM_HOST_DEFAULT="http://192.168.10.11:8080"
+LLM_HOST_DEFAULT="http://localhost:8080"
 if curl -sf "${LLM_HOST:-$LLM_HOST_DEFAULT}/v1/models" > /dev/null 2>&1; then
     NCTX=$(curl -s "${LLM_HOST:-$LLM_HOST_DEFAULT}/v1/models" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0].get("meta",{}).get("n_ctx","?"))' 2>/dev/null)
     echo "✅ LLM reachable (n_ctx=${NCTX}; /ask wants >= 8192)"
