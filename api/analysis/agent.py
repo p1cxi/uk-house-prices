@@ -28,6 +28,65 @@ def _strip_unmentioned_dates(question: str, args: dict) -> dict:
             args.pop(k, None)
     return args
 
+
+# --- Deterministic budget pre-router -------------------------------------------------
+# The flagship question ("if I had £200k, where's the best value?") is the one a small
+# planner model routes WRONG most often — it reaches for get_area_profile('UK') (empty)
+# or rank_areas (which ranks price-vs-peak DROPS, not affordability). Both produce
+# confidently-wrong answers. So when a question carries a real budget AND value/where
+# intent, we route to find_affordable_areas deterministically and skip the planner —
+# no LLM tool-pick to get wrong. The PLANNER_SYS rule remains a fallback for budget
+# questions phrased without a parseable figure ("where's cheap to buy?").
+_BUDGET_INTENT = re.compile(
+    r"\b(afford|budget|best value|value for money|for my money|cheapest|"
+    r"where (?:can|could|should|to|would|do|'?s)|spend|looking to (?:buy|spend)|"
+    r"buy a|get for|stretch|i (?:had|have|'ve got|got))\b", re.I)
+# £200k · £200,000 · 200k · 200 grand · 200000 · 1.5m
+_MONEY_RE = re.compile(r"£?\s*(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k|grand|m|mil|million)?\b", re.I)
+
+
+def _extract_budget(question: str):
+    """Largest plausible GBP figure in the text (≥£10k filters out '2 bedroom'/'2022')."""
+    best = None
+    for m in _MONEY_RE.finditer(question):
+        num = float(m.group(1).replace(",", ""))
+        unit = (m.group(2) or "").lower()
+        if unit in ("k", "grand"):
+            num *= 1_000
+        elif unit in ("m", "mil", "million"):
+            num *= 1_000_000
+        val = int(round(num))
+        if 10_000 <= val <= 50_000_000 and (best is None or val > best):
+            best = val
+    return best
+
+
+def _budget_route(question: str):
+    """Args for find_affordable_areas if this is a budget/value question, else None."""
+    if not _BUDGET_INTENT.search(question):
+        return None
+    budget = _extract_budget(question)
+    if budget is None:
+        return None
+    ql = question.lower()
+    scope = "london" if re.search(r"\b(london|m25)\b", ql) else "all"
+    # tenure honours an explicit word; default 'any'.
+    tenure = "leasehold" if "leasehold" in ql else "freehold" if "freehold" in ql else "any"
+    # property_type ONLY from a SPECIFIC type word. Bare "house" is deliberately left 'any':
+    # it's usually generic ("buy a house"), and a £200k 2-bed is mostly flats — narrowing to
+    # houses would hide exactly the stock that fits the budget (the wrong-narrowing trap).
+    if re.search(r"\b(flat|flats|apartment|apartments)\b", ql):
+        ptype = "flat"
+    elif re.search(r"\bdetached\b", ql):
+        ptype = "detached"
+    elif re.search(r"\bsemi[- ]?detached\b|\bsemi\b", ql):
+        ptype = "semi"
+    elif re.search(r"\b(terraced|terrace)\b", ql):
+        ptype = "terraced"
+    else:
+        ptype = "any"
+    return {"budget": budget, "area_scope": scope, "property_type": ptype, "tenure": tenure}
+
 PLANNER_SYS = """You are the planning step of a UK house-price analytics agent. The database holds \
 HM Land Registry SOLD prices for England & Wales, 1995-present (no rentals, no asking prices, no forecasts).
 
@@ -179,6 +238,16 @@ async def _synthesize(question, scratch):
 async def run_agent(question: str) -> dict:
     scratch = []
     used = set()
+
+    # Deterministic fast path for budget/value questions — bypass the planner entirely
+    # so it can't mis-route to get_area_profile('UK') or rank_areas (price-drop ≠ value).
+    pre = _budget_route(question)
+    if pre is not None:
+        result = await call_tool("find_affordable_areas", pre)
+        scratch.append({"tool": "find_affordable_areas", "args": pre, "result": _compact(result)})
+        answer = await _synthesize(question, scratch)
+        return {"answer": answer, "steps": 1, "observations": scratch, "routed": "budget"}
+
     for step in range(AGENT_MAX_STEPS):
         try:
             action = await _plan(question, scratch, AGENT_MAX_STEPS - step)
