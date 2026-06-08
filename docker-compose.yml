@@ -12,7 +12,9 @@ services:
       - ./data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
-      - "5432:5432"
+      # Host 5432 is taken by another project on this host; expose on 5433.
+      # Internal services still reach the DB at postgres:5432 over the compose network.
+      - "5433:5432"
     networks:
       - house_prices_net
     healthcheck:
@@ -29,7 +31,7 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
       GF_INSTALL_PLUGINS: ""
       GF_SERVER_SERVE_FROM_SUB_PATH: "true"
-      GF_SERVER_ROOT_URL: "https://prices.picxi.uk/grafana"
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://localhost:3001/grafana}"
       POSTGRES_DB: ${POSTGRES_DB:-house_prices}
       POSTGRES_USER: ${POSTGRES_USER:-prices}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -105,12 +107,19 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-prices}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       TARGET_COUNTIES: ${TARGET_COUNTIES}
-      OLLAMA_HOST: ${OLLAMA_HOST:-http://192.168.10.11:11434}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+      LLM_HOST: ${LLM_HOST:-http://localhost:8080}
+      LLM_MODEL: ${LLM_MODEL:-Qwen3-8B-Q4_K_M.gguf}
+      AGENT_DB_USER: ${AGENT_DB_USER:-agent_ro}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD}
+      AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-3}
+      AGENT_MAX_ROWS: ${AGENT_MAX_ROWS:-25}
+      AGENT_SQL_ROW_LIMIT: ${AGENT_SQL_ROW_LIMIT:-500}
+      AGENT_TOOL_MODE: ${AGENT_TOOL_MODE:-structured}
     volumes:
       - ./logs:/app/logs
     ports:
-      - "8001:8000"
+      # Host 8001/8002 taken by other projects on this host; expose on 8003.
+      - "8003:8000"
     networks:
       - house_prices_net
       - picxibox_net

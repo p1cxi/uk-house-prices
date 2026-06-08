@@ -1,12 +1,12 @@
 import os
 from typing import Dict, List, Optional, Tuple
 
-import httpx
 import psycopg
 from fastapi import APIRouter, HTTPException
 from psycopg.rows import dict_row
 
-from .config import DB_CONFIG, OLLAMA_HOST, OLLAMA_MODEL
+from .config import DB_CONFIG
+from .llm import chat
 from .state import _summary_cache
 
 router = APIRouter()
@@ -224,27 +224,12 @@ Markets by volume:
 {movers_block}
 {yoy_block}"""
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.1},
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(f"{OLLAMA_HOST}/api/generate", json=payload)
-            response.raise_for_status()
-            result = response.json()
-            if 'response' not in result:
-                raise HTTPException(503, "Invalid response format from AI service")
-            return result['response'].strip()
-    except httpx.TimeoutException:
-        raise HTTPException(503, "AI service timeout - please try again")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(503, f"AI service error: {e.response.status_code}")
-    except Exception as e:
-        raise HTTPException(503, f"AI service unavailable: {e}")
+    return await chat(
+        [{"role": "user", "content": prompt}],
+        max_tokens=300,
+        temperature=0.1,
+        enable_thinking=False,
+    )
 
 
 @router.post("/summarise/monthly")
