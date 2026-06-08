@@ -109,6 +109,27 @@ TOOLS = [
                "min_transactions": {"type": "integer", "default": 10, "minimum": 0},
                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 25}})),
 
+    Tool("find_affordable_areas",
+         "Given a BUDGET, find where it actually buys AND where it goes furthest (best value): "
+         "per area returns % of recent sales within budget (the budget's percentile = the value "
+         "signal — higher means your money buys a more typical/better home there), median + flat "
+         "median, and whether the median fits. Filter by tenure (freehold/leasehold) and "
+         "property_type (house = detached/semi/terraced, flat, or a specific type). USE THIS for "
+         "any budget/value question ('on £200k', 'best value for money', 'leasehold house under "
+         "£X'). area_scope='london' ≈ within the M25. NOT rank_areas (that's price drops). "
+         "NB: no bedroom count or floor area in the data — cannot filter by bedrooms or give £/m².",
+         _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
+               "area_scope": {"type": "string", "enum": ["london", "all", "county"], "default": "london",
+                              "description": "london = Greater London boroughs (~within M25); county = districts in one county (set 'county'); all = everywhere"},
+               "county": {"type": "string", "description": "county name; required when area_scope='county'"},
+               "property_type": {"type": "string",
+                                 "enum": ["any", "house", "flat", "detached", "semi", "terraced", "other"],
+                                 "default": "any", "description": "house = detached/semi/terraced"},
+               "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
+               "min_transactions": {"type": "integer", "default": 100, "minimum": 0},
+               "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": 30}},
+              required=["budget"])),
+
     Tool("run_sql",
          "Escape hatch: run a single read-only SELECT against the schema for questions "
          "the other tools don't cover (e.g. grouping by postcode/outcode). Tables: "
@@ -129,6 +150,7 @@ _HANDLERS = {
     "compare_areas": sql.compare_areas,
     "rank_areas": sql.rank_areas,
     "get_market_movers": sql.get_market_movers,
+    "find_affordable_areas": sql.find_affordable_areas,
     "run_sql": sql.run_sql,
 }
 
