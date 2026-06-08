@@ -11,7 +11,7 @@ A self-hosted data pipeline that ingests HM Land Registry Price Paid Data into P
 ```
 HM Land Registry API → FastAPI Service → PostgreSQL 16 → Grafana Dashboard
                     ↓        ↓             ↑
-                ONS API   Ollama AI    Materialized Views
+                ONS API  llama.cpp     Materialized Views
                          (Summary)    & Indexes
 ```
 
@@ -21,7 +21,7 @@ HM Land Registry API → FastAPI Service → PostgreSQL 16 → Grafana Dashboard
 - **Complete historical data**: Ingest full Land Registry dataset (1995-present)
 - **Automated updates**: Monthly delta processing with proper A/C/D record handling
 - **Gap detection & backfill**: Automatically detect missing months and re-ingest affected years
-- **AI-powered summaries**: Generate plain English market briefings via Ollama
+- **AI-powered summaries**: Generate plain English market briefings via a local llama.cpp server
 - **Geographic filtering**: Target specific counties for focused AI summaries and analysis
 - **Performance optimized**: Materialized views and strategic indexes for fast queries
 - **Rich visualizations**: Time series analysis, geographic heatmaps, market statistics
@@ -62,9 +62,9 @@ GRAFANA_ADMIN_PASSWORD=admin_password_here
 # Target areas for AI summaries (comma-separated, uppercase)
 TARGET_COUNTIES=ESSEX,HERTFORDSHIRE,KENT,SURREY,CAMBRIDGESHIRE
 
-# AI service configuration (optional)
-OLLAMA_HOST=http://192.168.10.11:11434
-OLLAMA_MODEL=llama3.2:3b
+# AI service configuration (optional) — llama.cpp OpenAI-compatible server
+LLM_HOST=http://192.168.10.11:8080
+LLM_MODEL=Qwen3-8B-Q4_K_M.gguf
 ```
 
 ### 4. Start Services
@@ -84,14 +84,14 @@ docker-compose ps
 
 ```bash
 # Full historical dataset (takes 30-60 minutes)
-curl -X POST http://localhost:8001/api/ingest/yearly?year=2023
+curl -X POST http://localhost:8003/api/ingest/yearly?year=2023
 
 # Check ingestion status
-curl http://localhost:8001/api/ingest/yearly_2023/status
+curl http://localhost:8003/api/ingest/yearly_2023/status
 
 # Or load multiple years
 for year in 2022 2023 2024; do
-  curl -X POST "http://localhost:8001/api/ingest/yearly?year=$year"
+  curl -X POST "http://localhost:8003/api/ingest/yearly?year=$year"
 done
 ```
 
@@ -101,11 +101,11 @@ done
 - Username: `admin`
 - Password: (from your `.env` file)
 
-**API Documentation**: `http://localhost:8001/api/docs`
+**API Documentation**: `http://localhost:8003/api/docs`
 - Interactive API explorer
 - Test endpoints directly
 
-**Health Check**: `http://localhost:8001/api/health`
+**Health Check**: `http://localhost:8003/api/health`
 
 ## Usage
 
@@ -113,27 +113,27 @@ done
 
 ```bash
 # Monthly updates (run monthly after 20th working day)
-curl -X POST http://localhost:8001/api/ingest/monthly
+curl -X POST http://localhost:8003/api/ingest/monthly
 
 # Yearly data ingestion
-curl -X POST "http://localhost:8001/api/ingest/yearly?year=2024"
+curl -X POST "http://localhost:8003/api/ingest/yearly?year=2024"
 
 # Check which months have data and whether any gaps exist
-curl http://localhost:8001/api/ingest/coverage
+curl http://localhost:8003/api/ingest/coverage
 
 # Backfill any missing months (re-ingests the affected years)
-curl -X POST http://localhost:8001/api/ingest/backfill
+curl -X POST http://localhost:8003/api/ingest/backfill
 
 # Check job status
-curl http://localhost:8001/api/ingest/monthly/status
-curl http://localhost:8001/api/ingest/yearly_2024/status
-curl http://localhost:8001/api/ingest/backfill/status
+curl http://localhost:8003/api/ingest/monthly/status
+curl http://localhost:8003/api/ingest/yearly_2024/status
+curl http://localhost:8003/api/ingest/backfill/status
 
 # Generate AI summary of recent market data
-curl -X POST http://localhost:8001/api/summarise/monthly
+curl -X POST http://localhost:8003/api/summarise/monthly
 
 # Health check
-curl http://localhost:8001/api/health
+curl http://localhost:8003/api/health
 ```
 
 ### AI Market Summaries
@@ -141,7 +141,7 @@ curl http://localhost:8001/api/health
 Generate plain English briefings suitable for push notifications, alongside structured data:
 
 ```bash
-curl -X POST http://localhost:8001/api/summarise/monthly
+curl -X POST http://localhost:8003/api/summarise/monthly
 ```
 
 Response shape:
@@ -173,10 +173,10 @@ Schedule monthly updates with cron:
 ```bash
 # Add to crontab (crontab -e)
 # Run monthly update on 21st at 6 AM
-0 6 21 * * curl -X POST http://localhost:8001/api/ingest/monthly
+0 6 21 * * curl -X POST http://localhost:8003/api/ingest/monthly
 
 # Generate and send AI summary after ingestion
-30 6 21 * * curl -X POST http://localhost:8001/api/summarise/monthly | jq -r '.summary' | your-notification-system
+30 6 21 * * curl -X POST http://localhost:8003/api/summarise/monthly | jq -r '.summary' | your-notification-system
 ```
 
 Or use n8n for more complex workflows:
@@ -192,13 +192,13 @@ Or use n8n for more complex workflows:
 docker-compose logs api
 
 # Monitor running jobs
-curl http://localhost:8001/api/ingest/monthly/status
+curl http://localhost:8003/api/ingest/monthly/status
 
 # Database status
 docker-compose exec postgres psql -U prices -d house_prices -c "SELECT * FROM get_data_freshness();"
 
 # Service health
-curl http://localhost:8001/api/health
+curl http://localhost:8003/api/health
 docker-compose ps
 ```
 
@@ -311,7 +311,7 @@ docker-compose logs postgres grafana
 cat .env
 
 # Check port conflicts
-ss -tlpn | grep -E ":3001|:8001|:5432"
+ss -tlpn | grep -E ":3001|:8003|:5433"
 ```
 
 **API/Ingestion fails**
@@ -320,7 +320,7 @@ ss -tlpn | grep -E ":3001|:8001|:5432"
 docker-compose logs api
 
 # Test API health
-curl http://localhost:8001/api/health
+curl http://localhost:8003/api/health
 
 # Check database connectivity
 docker-compose exec postgres psql -U prices -d house_prices -c "\dt"
