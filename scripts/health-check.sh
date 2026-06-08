@@ -57,6 +57,16 @@ else
 fi
 echo
 
+# Check the MCP server (streamable HTTP) exposing the analysis tools at :8004/mcp
+echo "🧰 MCP Server:"
+MCP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 3 http://localhost:8004/mcp 2>/dev/null)
+if [ "$MCP_CODE" != "000" ]; then
+    echo "✅ MCP server reachable at :8004/mcp (HTTP $MCP_CODE)"
+else
+    echo "❌ MCP server not responding"
+fi
+echo
+
 # Check the agent's read-only DB role exists and is genuinely read-only
 echo "🔒 Agent read-only role:"
 docker-compose exec -T postgres psql -U prices -d house_prices -tAc "

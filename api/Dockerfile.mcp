@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+WORKDIR /
+
+COPY api/requirements-mcp.txt /tmp/req.txt
+RUN pip install --no-cache-dir -r /tmp/req.txt
+
+# Only the api package is needed (the MCP server imports api.analysis.tools);
+# no ingest, no httpx/fastapi.
+COPY api/ /api/
+
+ENV PYTHONPATH=/
+
+RUN useradd --create-home --shell /bin/bash app && chown -R app:app /api
+USER app
+
+# Streamable-HTTP MCP server, served at /mcp
+CMD ["uvicorn", "api.mcp_server:app", "--host", "0.0.0.0", "--port", "8000"]
