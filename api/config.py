@@ -24,6 +24,14 @@ AGENT_DB_CONFIG = {
     'password': os.getenv('AGENT_DB_PASSWORD'),
 }
 
+# EPC (Energy Performance Certificate) data. Initial full load is a one-time manual bulk
+# download (GOV.UK One Login) into EPC_DIR; quarterly top-ups use the developer API with
+# HTTP Basic auth (email + API key) — kept ONLY in gitignored .env (repo is public).
+EPC_DIR = os.getenv('EPC_DIR', './epc_data')
+EPC_API_BASE = os.getenv('EPC_API_BASE', 'https://epc.opendatacommunities.org/api/v1/domestic/search')
+EPC_API_EMAIL = os.getenv('EPC_API_EMAIL')
+EPC_API_KEY = os.getenv('EPC_API_KEY')
+
 # /ask agent loop tuning.
 AGENT_MAX_STEPS = int(os.getenv('AGENT_MAX_STEPS', 3))        # max tool calls per question
 AGENT_MAX_ROWS = int(os.getenv('AGENT_MAX_ROWS', 25))        # rows per observation fed back to LLM
