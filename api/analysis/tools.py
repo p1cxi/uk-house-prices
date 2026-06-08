@@ -21,13 +21,10 @@ _RUN_SQL_TIMEOUT_MS = 8000
 # Reusable schema fragments
 _AREA_LEVEL = {"type": "string", "enum": ["county", "district", "auto"], "default": "auto",
                "description": "county, London-borough district, or auto-detect"}
-_PROPERTY_TYPE = {"type": "string", "enum": ["D", "S", "T", "F", "O", "all"], "default": "all",
-                  "description": "D=detached S=semi T=terraced F=flat O=other, or all"}
-_TENURE = {"type": "string", "enum": ["F", "L", "all"], "default": "all"}
-_NEW_BUILD = {"type": "string", "enum": ["Y", "N", "all"], "default": "all"}
-_DATE = {"type": "string", "description": "YYYY-MM-DD"}
-_AREAS = {"type": ["array", "string"], "items": {"type": "string"},
-          "description": "one or more area names (county or London borough)"}
+# Friendly property-type group shared by the budget + value tools.
+_PTYPE_GROUP = {"type": "string",
+                "enum": ["any", "house", "flat", "detached", "semi", "terraced", "other"],
+                "default": "any", "description": "house = detached/semi/terraced"}
 
 
 @dataclass(frozen=True)
@@ -43,92 +40,64 @@ def _obj(props: dict, required=None) -> dict:
             "required": required or [], "additionalProperties": False}
 
 
+# The tool set is organised around what a first-time buyer actually asks. Three orthogonal
+# intent tools (a small model picks reliably from a few non-overlapping tools) plus two
+# utilities. General questions ("what is a leasehold?") need no tool — the model just answers.
 TOOLS = [
-    Tool("get_data_coverage",
-         "How fresh the data is and which recent months are complete enough to trust "
-         "(Land Registry registers sales with a lag). Call this before answering "
-         "'this month' / 'latest' questions.",
-         _obj({"area": {"type": "string"}, "area_level": _AREA_LEVEL})),
-
-    Tool("get_area_trend",
-         "Time series of median/mean price or transaction count for ONE area over a "
-         "date range. Use granularity=year for spans over ~3 years to keep it readable.",
-         _obj({"area": {"type": "string"}, "area_level": _AREA_LEVEL,
-               "date_from": _DATE, "date_to": _DATE,
-               "granularity": {"type": "string", "enum": ["month", "quarter", "year"], "default": "month"},
-               "property_type": _PROPERTY_TYPE, "tenure": _TENURE, "new_build": _NEW_BUILD,
-               "metric": {"type": "string", "enum": ["median", "mean", "count"], "default": "median"},
-               "include_incomplete": {"type": "boolean", "default": False}},
-              required=["area"])),
-
-    Tool("get_area_profile",
-         "Latest snapshot for ONE area: headline median, MoM and YoY change, and the "
-         "breakdown by property type, tenure and new-build share.",
-         _obj({"area": {"type": "string"}, "area_level": _AREA_LEVEL, "as_of": _DATE},
-              required=["area"])),
-
-    Tool("get_price_index",
-         "Rebased price index (base month = 100) for one or more areas. Use to answer "
-         "'is X still below its 2022 peak?' or 'which recovered fastest after the dip?'. "
-         "Returns peak, current index and current-vs-peak %.",
-         _obj({"areas": _AREAS, "base_period": _DATE, "date_from": _DATE, "date_to": _DATE,
-               "property_type": _PROPERTY_TYPE, "area_level": _AREA_LEVEL,
-               "include_incomplete": {"type": "boolean", "default": False}},
-              required=["areas", "base_period"])),
-
-    Tool("compare_areas",
-         "Compare 2+ areas side by side: start value, end value and % change over the "
-         "last N months.",
-         _obj({"areas": _AREAS, "metric": {"type": "string", "enum": ["median", "mean"], "default": "median"},
-               "months": {"type": "integer", "default": 12, "minimum": 1},
-               "property_type": _PROPERTY_TYPE, "area_level": _AREA_LEVEL},
-              required=["areas"])),
-
-    Tool("rank_areas",
-         "Rank/screen ALL areas by a metric (median-based, outlier-robust). For 'furthest "
-         "below their 2022 peak': metric=current_vs_peak_pct, order=asc, and NO where_ filters. "
-         "Add where_current_vs_peak_lt / where_volume_momentum_gt ONLY for a compound screen "
-         "the user explicitly asks for (e.g. 'below peak AND volume recovering').",
-         _obj({"metric": {"type": "string",
-                          "enum": ["current_vs_peak_pct", "volume_momentum_pct", "growth_pct"],
-                          "default": "current_vs_peak_pct"},
-               "area_level": {"type": "string", "enum": ["county", "district", "both"], "default": "both"},
-               "peak_since": _DATE,
-               "property_type": _PROPERTY_TYPE,
-               "min_transactions": {"type": "integer", "default": 50, "minimum": 0},
-               "where_current_vs_peak_lt": {"type": "number"},
-               "where_volume_momentum_gt": {"type": "number"},
-               "order": {"type": "string", "enum": ["asc", "desc"], "default": "desc"},
-               "limit": {"type": "integer", "default": 20, "minimum": 1, "maximum": 50}})),
-
-    Tool("get_market_movers",
-         "Latest MoM or YoY median price gainers/fallers across counties and London "
-         "boroughs (the conversational twin of the monthly briefing).",
-         _obj({"change_type": {"type": "string", "enum": ["mom", "yoy"], "default": "yoy"},
-               "direction": {"type": "string", "enum": ["gainers", "fallers", "both"], "default": "both"},
-               "min_transactions": {"type": "integer", "default": 10, "minimum": 0},
-               "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 25}})),
-
     Tool("find_affordable_areas",
-         "Given a BUDGET, find where it actually buys AND where it goes furthest (best value): "
-         "per area returns % of recent sales within budget (the budget's percentile = the value "
-         "signal — higher means your money buys a more typical/better home there), median + flat "
+         "Q: 'Does £X fit, and where does my money go furthest?' Given a BUDGET, returns per "
+         "area the % of recent sales within budget (the budget's percentile = the value signal — "
+         "higher means your money buys a more typical/better home there), the median + flat "
          "median, and whether the median fits. Filter by tenure (freehold/leasehold) and "
          "property_type (house = detached/semi/terraced, flat, or a specific type). USE THIS for "
-         "any budget/value question ('on £200k', 'best value for money', 'leasehold house under "
-         "£X'). area_scope='london' ≈ within the M25. NOT rank_areas (that's price drops). "
+         "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
+         "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
+         "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
+         "county. Do NOT default to London. "
          "NB: no bedroom count or floor area in the data — cannot filter by bedrooms or give £/m².",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
-               "area_scope": {"type": "string", "enum": ["london", "all", "county"], "default": "london",
-                              "description": "london = Greater London boroughs (~within M25); county = districts in one county (set 'county'); all = everywhere"},
+               "area_scope": {"type": "string", "enum": ["all", "london", "county"], "default": "all",
+                              "description": "all = nationwide (England & Wales, the default); london = Greater London boroughs (~within M25), use only if the user says London/M25; county = districts in one county (set 'county')"},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
-               "property_type": {"type": "string",
-                                 "enum": ["any", "house", "flat", "detached", "semi", "terraced", "other"],
-                                 "default": "any", "description": "house = detached/semi/terraced"},
+               "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
                "min_transactions": {"type": "integer", "default": 100, "minimum": 0},
                "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": 30}},
               required=["budget"])),
+
+    Tool("assess_value",
+         "Q: 'Is this place — or this asking price — good value or overpriced?' Pass ONE area "
+         "(county like KENT or London borough like BROMLEY) and optionally a candidate_price "
+         "(+property_type) you're weighing up. Triangulates value three ways: vs the area's OWN "
+         "history (how far below/above its peak, 12-month direction), vs PEERS (its median vs the "
+         "national typical for that type), and — if candidate_price is given — where that price "
+         "sits in the LOCAL distribution (its percentile). USE THIS for 'is X good value?', 'am I "
+         "overpaying?', 'is £350k for a semi in Bromley fair?'. Value is RELATIVE to the market, "
+         "NOT intrinsic £/m² (no floor area in the data).",
+         _obj({"area": {"type": "string", "description": "a county (e.g. KENT) or London borough (e.g. BROMLEY)"},
+               "area_level": _AREA_LEVEL,
+               "property_type": _PTYPE_GROUP,
+               "candidate_price": {"type": "integer", "minimum": 1000,
+                                   "description": "optional asking price (GBP) to judge against local sales"}},
+              required=["area"])),
+
+    Tool("scan_market",
+         "Q: 'I don't know where to look — where's the action?' Screens ALL counties + London "
+         "boroughs by focus: 'falling' (biggest YoY median fallers — cooling markets / potential "
+         "entry points), 'rising' (biggest YoY median gainers — hottest markets), 'cheapest' "
+         "(lowest absolute median — entry-level areas). USE THIS for open-ended 'where should I "
+         "be looking?', 'where are prices dropping/rising?', 'where are the cheapest places?'. No "
+         "budget needed — for 'what fits £X' use find_affordable_areas. All property types.",
+         _obj({"focus": {"type": "string", "enum": ["falling", "rising", "cheapest"],
+                         "default": "falling"},
+               "area_level": {"type": "string", "enum": ["county", "district", "both"], "default": "both"},
+               "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": 25}})),
+
+    Tool("get_data_coverage",
+         "How fresh the data is and which recent months are complete enough to trust "
+         "(Land Registry registers sales with a lag). Call this for 'how current is the data?' "
+         "or before answering 'this month' / 'latest' questions.",
+         _obj({"area": {"type": "string"}, "area_level": _AREA_LEVEL})),
 
     Tool("run_sql",
          "Escape hatch: run a single read-only SELECT against the schema for questions "
@@ -143,25 +112,19 @@ REGISTRY = {t.name: t for t in TOOLS}
 
 # bind handlers by name
 _HANDLERS = {
-    "get_data_coverage": sql.get_data_coverage,
-    "get_area_trend": sql.get_area_trend,
-    "get_area_profile": sql.get_area_profile,
-    "get_price_index": sql.get_price_index,
-    "compare_areas": sql.compare_areas,
-    "rank_areas": sql.rank_areas,
-    "get_market_movers": sql.get_market_movers,
     "find_affordable_areas": sql.find_affordable_areas,
+    "assess_value": sql.assess_value,
+    "scan_market": sql.scan_market,
+    "get_data_coverage": sql.get_data_coverage,
     "run_sql": sql.run_sql,
 }
 
 
 # Small models fuzz enum casing / values; coerce before validating so we don't reject
-# COUNTY->county, median_price->median, "false"->False, "flat"->F, etc.
+# COUNTY->county, "semi-detached"->semi, "apartment"->flat, "false"->False, etc.
 _ENUM_ALIASES = {
-    "median_price": "median", "mean_price": "mean", "avg": "mean", "average": "mean",
-    "transaction_count": "count", "transactions": "count", "volume": "count", "price": "median",
-    "detached": "D", "semi": "S", "semi-detached": "S", "terraced": "T", "terrace": "T",
-    "flat": "F", "apartment": "F", "other": "O", "freehold": "F", "leasehold": "L",
+    "semi-detached": "semi", "semidetached": "semi", "terrace": "terraced",
+    "apartment": "flat", "flats": "flat", "houses": "house",
 }
 
 

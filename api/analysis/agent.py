@@ -13,10 +13,11 @@ from ..config import AGENT_MAX_STEPS, AGENT_MAX_ROWS
 from ..llm import chat, extract_json_object
 from .tools import REGISTRY, call_tool, tool_catalog_text
 
-# Small local models have a stale sense of "now" and invent date ceilings (e.g. date_to
-# "2024-06"), capping answers at old data. Deterministic guard: drop any date-typed arg
-# whose year the user didn't actually mention — the tools then default to the latest data.
-_DATE_ARGS = ("date_from", "date_to", "base_period", "as_of", "peak_since")
+# Small local models have a stale sense of "now" and invent date ceilings, capping answers at
+# old data. Deterministic guard: drop any date-typed arg whose year the user didn't actually
+# mention — tools then default to the latest data. (Kept defensively; the current tool set
+# takes no explicit date args, but run_sql or a future tool might.)
+_DATE_ARGS = ("date_from", "date_to")
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 
 
@@ -31,10 +32,10 @@ def _strip_unmentioned_dates(question: str, args: dict) -> dict:
 
 # --- Deterministic budget pre-router -------------------------------------------------
 # The flagship question ("if I had £200k, where's the best value?") is the one a small
-# planner model routes WRONG most often — it reaches for get_area_profile('UK') (empty)
-# or rank_areas (which ranks price-vs-peak DROPS, not affordability). Both produce
-# confidently-wrong answers. So when a question carries a real budget AND value/where
-# intent, we route to find_affordable_areas deterministically and skip the planner —
+# planner model routes WRONG most often — historically it reached for a single-area profile
+# of "UK" (empty) or a price-vs-peak screen (drops, not affordability), both confidently
+# wrong. So when a question carries a real budget AND value/where intent, we route to
+# find_affordable_areas deterministically and skip the planner —
 # no LLM tool-pick to get wrong. The PLANNER_SYS rule remains a fallback for budget
 # questions phrased without a parseable figure ("where's cheap to buy?").
 _BUDGET_INTENT = re.compile(
@@ -98,22 +99,23 @@ Reply with ONE JSON object and nothing else, exactly one of:
 Available tools:
 {catalog}
 
-Rules:
-- Choose the single most useful next tool; prefer the typed tools over run_sql.
-- Area names match Land Registry values: counties like KENT, SURREY, WEST MIDLANDS; London boroughs like BEXLEY.
-- get_area_profile / get_area_trend / get_price_index / compare_areas need a SPECIFIC county or London
-  borough — NEVER a country/region ('UK', 'England', 'nationwide'). A question asking WHICH areas (best
-  value, cheapest, where to buy/afford) is a screen: use find_affordable_areas (budget) or rank_areas.
-- Only pass date parameters (date_from / date_to / base_period / as_of) that the user EXPLICITLY names.
-  Otherwise omit them entirely — the tools default to the latest complete data. NEVER assume today's date.
-- BUDGET / "what can I afford" / "best value for money" / "cheapest under £X": use
-  find_affordable_areas (absolute price vs budget), NOT rank_areas (current_vs_peak_pct is price
-  drops, not affordability). Set area_scope by geography: 'london' for London / "within the M25";
+Rules — match the user's intent to ONE tool:
+- BUDGET / "what can I afford" / "where does £X go" / "best value for my money" / "under £X":
+  find_affordable_areas. Set area_scope by geography: 'london' for London / "within the M25";
   'county' (+county) for a named county; 'all' for nationwide / "England" / "UK" / "anywhere".
-  Pass property_type ('house'/'flat' or a specific type) and tenure ('freehold'/'leasehold') only
-  when the user names them; otherwise leave them 'any'. There is NO bedroom or floor-area data —
-  you cannot filter by bedrooms or compute £/m².
-- Do not repeat a tool call already shown in the observations.
+  Pass property_type ('house'/'flat'/a specific type) and tenure ('freehold'/'leasehold') only
+  when the user names them; otherwise leave them 'any'.
+- "Is X good value / overpriced?", "am I overpaying?", "is £Y for a <type> in <area> fair?":
+  assess_value. Pass the specific area; add candidate_price (+property_type) when the user names a
+  price/type. Needs a SPECIFIC county or London borough — never a country/region.
+- "Where should I look?", "where are prices rising / falling?", "where are the cheapest areas?":
+  scan_market with focus = falling / rising / cheapest.
+- "How fresh / how complete is the data?": get_data_coverage.
+- A novel cut the tools don't cover (postcode/outcode grouping, custom percentile): run_sql.
+- Area names match Land Registry values: counties like KENT, SURREY, WEST MIDLANDS; London boroughs
+  like BROMLEY, BEXLEY. There is NO bedroom or floor-area data — never filter by bedrooms or compute £/m².
+- Only pass date parameters the user EXPLICITLY names; otherwise omit them (tools default to the
+  latest complete data). NEVER assume today's date. Do not repeat a call already in the observations.
 - When you have enough numbers, return {{"final": true}}."""
 
 SYNTH_SYS = """You are a UK property market analyst. Answer the user's question using ONLY the figures \
@@ -240,7 +242,7 @@ async def run_agent(question: str) -> dict:
     used = set()
 
     # Deterministic fast path for budget/value questions — bypass the planner entirely
-    # so it can't mis-route to get_area_profile('UK') or rank_areas (price-drop ≠ value).
+    # so it can't mis-route a budget question to assess_value or scan_market.
     pre = _budget_route(question)
     if pre is not None:
         result = await call_tool("find_affordable_areas", pre)
