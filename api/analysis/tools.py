@@ -51,11 +51,13 @@ TOOLS = [
          "median, and whether the median fits. Filter by tenure (freehold/leasehold) and "
          "property_type (house = detached/semi/terraced, flat, or a specific type). USE THIS for "
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
-         "'leasehold house under £X'). area_scope='london' ≈ within the M25; 'all' = nationwide. "
+         "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
+         "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
+         "county. Do NOT default to London. "
          "NB: no bedroom count or floor area in the data — cannot filter by bedrooms or give £/m².",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
-               "area_scope": {"type": "string", "enum": ["london", "all", "county"], "default": "london",
-                              "description": "london = Greater London boroughs (~within M25); county = districts in one county (set 'county'); all = everywhere"},
+               "area_scope": {"type": "string", "enum": ["all", "london", "county"], "default": "all",
+                              "description": "all = nationwide (England & Wales, the default); london = Greater London boroughs (~within M25), use only if the user says London/M25; county = districts in one county (set 'county')"},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},

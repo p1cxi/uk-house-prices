@@ -384,7 +384,7 @@ async def scan_market(conn, focus="falling", area_level="both", limit=12):
             "note": note, "meta": {"last_complete_month": lcm.isoformat()}}
 
 
-async def find_affordable_areas(conn, budget, area_scope="london", county=None,
+async def find_affordable_areas(conn, budget, area_scope="all", county=None,
                                 property_type="any", tenure="any",
                                 min_transactions=100, limit=12):
     """Given a BUDGET, find where it actually buys (and where it goes furthest = best value).
