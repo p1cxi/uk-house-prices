@@ -132,6 +132,31 @@ services:
       timeout: 5s
       retries: 3
 
+  mcp:
+    build:
+      context: .
+      dockerfile: api/Dockerfile.mcp
+    container_name: house_prices_mcp
+    restart: unless-stopped
+    # Streamable-HTTP MCP server exposing the analysis tools at /mcp.
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-house_prices}
+      # Read-only agent_ro role only — the MCP server never needs write access.
+      AGENT_DB_USER: ${AGENT_DB_USER:-agent_ro}
+      AGENT_DB_PASSWORD: ${AGENT_DB_PASSWORD}
+      AGENT_SQL_ROW_LIMIT: ${AGENT_SQL_ROW_LIMIT:-500}
+      # CORS origins allowed for browser MCP clients (comma-separated; default any)
+      MCP_ALLOW_ORIGINS: ${MCP_ALLOW_ORIGINS:-*}
+    ports:
+      - "8004:8000"
+    networks:
+      - house_prices_net
+      - picxibox_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 networks:
   house_prices_net:
     driver: bridge
