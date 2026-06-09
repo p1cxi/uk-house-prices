@@ -52,16 +52,19 @@ TOOLS = [
          "resale (new_build), and property_type (house = detached/semi/terraced, flat, or a specific "
          "type). USE THIS for "
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
-         "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
-         "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
-         "county. Do NOT default to London. Also returns each area's median £/m² (EPC-matched "
+         "'leasehold house under £X'). Set area_scope by geography: 'london' whenever London / "
+         "Greater London / the M25 is mentioned — INCLUDING comparatives ('closer to London', "
+         "'near London', 'around London'); 'county' (+county) for a named county; 'all' (nationwide) "
+         "only when NO place is named. On a follow-up that adds a place (e.g. 'anything closer to "
+         "London?'), re-call with area_scope updated and the earlier filters kept. Also returns "
+         "each area's median £/m² (EPC-matched "
          "sales only — see sqm_match_pct); supports an optional floor-area band "
          "(min_floor_area/max_floor_area, m²) and sort='ppsqm' (rank by cheapest £/m²). Use "
          "sort='ppsqm' for 'cheapest/best value per square metre'. NB: £/m² & size are EPC-matched "
          "only; there is still NO bedroom count (habitable rooms is an approximate proxy, not bedrooms).",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
                "area_scope": {"type": "string", "enum": ["all", "london", "county"], "default": "all",
-                              "description": "all = nationwide (England & Wales, the default); london = Greater London boroughs (~within M25), use only if the user says London/M25; county = districts in one county (set 'county')"},
+                              "description": "all = nationwide (England & Wales), use only when no place is named; london = Greater London boroughs (~within the M25) — use whenever London/the M25 is mentioned, incl. 'in/near/around/closer to London'; county = districts of one named county (also set 'county')"},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},

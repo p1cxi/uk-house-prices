@@ -642,16 +642,31 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
         r["sqm_match_pct"] = round(100.0 * r["sqm_matched"] / r["sales"], 1) if r["sales"] else None
     any_fit = any(r["median_within_budget"] for r in rows)
     size_on = bool(min_fa or max_fa)
+    if not rows:
+        applied = ", ".join(
+            x for x in (f"{property_type}s" if pg else None,
+                        tenure if tenure in ("freehold", "leasehold") else None,
+                        f"{new_build}-build" if new_build in ("new", "resale") else None)
+            if x)
+        note = ("No areas matched these filters in this scope — too few sales clear the "
+                f"min_transactions={int(min_transactions)} floor"
+                + (f" for {applied}" if applied else "")
+                + ". This combination is rare here (e.g. leasehold houses are uncommon, especially "
+                  "in London). Relax tenure to 'any', try property_type='flat', widen area_scope, "
+                  "or lower min_transactions — do NOT present this as 'no affordable areas'.")
+    elif not any_fit:
+        note = ("No area in this scope has a median at/below the budget — it only reaches the "
+                "cheaper end (see pct_within_budget and median_flat). Consider cheaper property "
+                "types, a wider area_scope, or areas outside this scope.")
+    else:
+        note = None
     return {
         "budget": budget, "area_scope": area_scope, "sort": sort,
         "property_type": property_type, "tenure": tenure, "new_build": new_build,
         "size_filter": {"min_m2": min_fa, "max_m2": max_fa} if size_on else None,
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "any_area_median_within_budget": any_fit,
-        "note": (None if any_fit else
-                 "No area in this scope has a median at/below the budget — it only reaches the "
-                 "cheaper end (see pct_within_budget and median_flat). Consider cheaper property "
-                 "types, a wider area_scope, or areas outside this scope."),
+        "note": note,
         "data_note": ("'pct_within_budget' is the budget's percentile across ALL sales (full "
                       "coverage) for the chosen type+tenure — higher = your money buys a more "
                       "typical/better home there. 'median_ppsqm' and any size-band figures "
