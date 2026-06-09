@@ -19,6 +19,9 @@ GRANT CONNECT ON DATABASE house_prices TO agent_ro;
 GRANT USAGE ON SCHEMA public TO agent_ro;
 GRANT SELECT ON transactions, postcodes, market_transactions, monthly_price_stats TO agent_ro;
 
+-- NB: EPC objects + refresh_epc_stats() (03_epc_schema.sql) are GRANTed/REVOKEd at the END of
+-- 03 itself — on a fresh volume this file runs BEFORE 03, so they don't exist here yet.
+
 -- get_data_freshness() is read-only; the matview refresh function must stay ungranted.
 GRANT EXECUTE ON FUNCTION get_data_freshness() TO agent_ro;
 REVOKE EXECUTE ON FUNCTION refresh_monthly_stats() FROM agent_ro;

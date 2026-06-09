@@ -19,8 +19,10 @@ Design rules (unchanged):
   >= 40% of the trailing-12-month average monthly volume) bounds "current" figures.
 - Every value the LLM can influence is a BOUND parameter; only validated enums
   (area_level, focus) are ever interpolated.
-- No bedroom count / floor area exists in Land Registry — tools never filter by
-  bedrooms or report £/m² (that's the planned EPC layer).
+- Floor area / £-per-m² / energy rating come from the EPC layer via the enriched view
+  market_transactions_epc (LEFT JOIN, NULL where unmatched). Coverage is PARTIAL, so
+  assess_value / find_affordable_areas report £/m² with its match rate and suppress it
+  when too thin. Bedroom counts still do not exist — habitable rooms is only a proxy.
 """
 from datetime import date
 
@@ -37,6 +39,20 @@ _PGROUP_SQL = {"house": "property_type IN ('D','S','T')", "flat": "property_type
 _PTYPE_FRIENDLY = {"any": "all property types", "house": "houses (detached/semi/terraced)",
                    "flat": "flats", "detached": "detached houses", "semi": "semi-detached houses",
                    "terraced": "terraced houses", "other": "other property types"}
+
+# EPC-enriched view (market_transactions + matched floor area / £-per-m² / energy rating,
+# NULL where unmatched). EPC coverage is PARTIAL, so £/m² is always reported with its match
+# rate and the tools degrade to the price-only answer when coverage is too thin to trust.
+_EPC_VIEW = "market_transactions_epc"
+_SQM_MIN, _SQM_MAX = 20, 2000   # floor-area sanity band (drops 0 / sqft mis-entries / mansions)
+
+
+def _coverage(matched, total, floor_pct=30, min_n=30):
+    """(match_pct, trustworthy). Below the floor or min_n, £/m² is suppressed."""
+    if not total or not matched:
+        return (None, False)
+    pct = round(100.0 * matched / total, 1)
+    return (pct, matched >= min_n and pct >= floor_pct)
 
 # Whole-country/region names that are NOT a single area the area-scoped tools handle.
 _COUNTRY_TERMS = {"UK", "U.K.", "THE UK", "UNITED KINGDOM", "ENGLAND", "WALES",
@@ -131,16 +147,32 @@ async def get_data_coverage(conn, area=None, area_level="auto"):
             GROUP BY month ORDER BY month
         """)
         recent = await cur.fetchall()
+        # EPC match coverage (share of sold transactions matched to an EPC certificate).
+        await cur.execute("""
+            SELECT sum(total_txns)::bigint AS total, sum(matched_txns)::bigint AS matched,
+                   sum(total_txns)   FILTER (WHERE year >= DATE '2008-01-01')::bigint AS total_recent,
+                   sum(matched_txns) FILTER (WHERE year >= DATE '2008-01-01')::bigint AS matched_recent
+            FROM epc_match_coverage
+        """)
+        epc = await cur.fetchone()
     for r in recent:
         r["month"] = r["month"].isoformat()
         r["transactions"] = int(r["transactions"])
         r["considered_complete"] = (lcm is not None and r["month"] <= lcm.isoformat())
+    epc_total = epc["total"] if epc else 0
+    epc_recent = epc["total_recent"] if epc else 0
     return {
         "last_transaction_date": fresh["last_transaction_date"].isoformat() if fresh and fresh["last_transaction_date"] else None,
         "total_transactions": int(fresh["total_transactions"]) if fresh else 0,
         "last_complete_month": lcm.isoformat() if lcm else None,
         "note": "HM Land Registry registers sales with a lag; recent months marked incomplete will grow.",
         "recent_months": recent,
+        "epc_match": {
+            "matched_pct_all": round(100.0 * epc["matched"] / epc_total, 1) if epc_total else 0.0,
+            "matched_pct_since_2008": round(100.0 * epc["matched_recent"] / epc_recent, 1) if epc_recent else 0.0,
+            "note": ("Share of sold transactions matched to an EPC certificate (adds floor area / "
+                     "£-per-m² / energy rating). 0% until the EPC bulk data is loaded."),
+        },
     }
 
 
@@ -154,13 +186,15 @@ def _band(value, low, high, below, mid, above):
     return mid
 
 
-async def assess_value(conn, area, area_level="auto", property_type="any", candidate_price=None):
-    """Is a place — or a specific asking price — good value or overpriced? Triangulates three
-    angles, all RELATIVE to the market (not intrinsic £/m², which needs floor area we lack):
-      • vs the area's OWN history: how far below/above its peak median, and 12-month direction;
+async def assess_value(conn, area, area_level="auto", property_type="any", candidate_price=None,
+                       candidate_floor_area=None):
+    """Is a place — or a specific asking price — good value or overpriced? Triangulates:
+      • vs the area's OWN history: how far below/above its peak median, 12-month direction;
       • vs PEERS: the area's median vs the national typical for that property type;
-      • vs the LOCAL distribution: if a candidate_price is given, its percentile among recent
-        local sales of that type (the precise 'is this asking price fair?' signal)."""
+      • vs the LOCAL distribution: a candidate_price's percentile among recent local sales;
+      • vs £/m² (EPC-matched sales only, coverage permitting): the area's median £/m² vs national,
+        and — given candidate_floor_area — the candidate's own £/m² and where it sits locally.
+    £/m² is suppressed (price-only answer) when too few sales here are EPC-matched to trust."""
     guard = _country_guard(area)
     if guard:
         return guard
@@ -172,16 +206,19 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
     prior_start = recent_start - relativedelta(years=1)    # the 12 months before that
     end_excl = end + relativedelta(months=1)
     cand = int(candidate_price) if candidate_price else None
+    cand_fa = float(candidate_floor_area) if candidate_floor_area else None
+    cand_ppsqm = round(cand / cand_fa) if (cand and cand_fa and cand_fa > 0) else None
     where_area = _area_where(area_level)
     type_sql = ""
     pg = _PGROUP_SQL.get(property_type)
     if pg:
         type_sql = " AND " + pg
     params = {"area": area, "recent_start": recent_start, "prior_start": prior_start,
-              "end_excl": end_excl, "cand": cand, "min_month_tx": 30}
+              "end_excl": end_excl, "cand": cand, "cand_ppsqm": cand_ppsqm,
+              "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_month_tx": 30}
 
     async with conn.cursor(row_factory=dict_row) as cur:
-        # 1) recent vs prior-year median + sales + candidate-price percentile
+        # 1) recent vs prior-year median + sales + candidate percentile, AND EPC £/m² (one scan)
         await cur.execute(f"""
             SELECT
               count(*) FILTER (WHERE date >= %(recent_start)s)::int AS sales_recent,
@@ -189,10 +226,28 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                   FILTER (WHERE date >= %(recent_start)s)::bigint AS median_recent,
               percentile_cont(0.5) WITHIN GROUP (ORDER BY price)
                   FILTER (WHERE date >= %(prior_start)s AND date < %(recent_start)s)::bigint AS median_prior,
-              round(100.0 * count(*) FILTER (WHERE %(cand)s IS NOT NULL AND price <= %(cand)s
+              round(100.0 * count(*) FILTER (WHERE %(cand)s::int IS NOT NULL AND price <= %(cand)s::int
                                                AND date >= %(recent_start)s)
-                    / NULLIF(count(*) FILTER (WHERE date >= %(recent_start)s), 0), 1) AS candidate_pctile
-            FROM market_transactions
+                    / NULLIF(count(*) FILTER (WHERE date >= %(recent_start)s), 0), 1) AS candidate_pctile,
+              -- EPC-matched £/m² over the recent window (floor-area sanity band)
+              count(*) FILTER (WHERE date >= %(recent_start)s AND price_per_sqm IS NOT NULL
+                               AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::int AS sqm_matched,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_sqm)
+                  FILTER (WHERE date >= %(recent_start)s
+                          AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::bigint AS area_ppsqm,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY total_floor_area)
+                  FILTER (WHERE date >= %(recent_start)s
+                          AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::numeric AS median_floor_area,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY habitable_rooms)
+                  FILTER (WHERE date >= %(recent_start)s AND habitable_rooms > 0)::numeric AS median_habitable_rooms,
+              mode() WITHIN GROUP (ORDER BY current_energy_rating)
+                  FILTER (WHERE date >= %(recent_start)s AND current_energy_rating IS NOT NULL) AS typical_rating,
+              round(100.0 * count(*) FILTER (WHERE %(cand_ppsqm)s::int IS NOT NULL AND date >= %(recent_start)s
+                               AND price_per_sqm IS NOT NULL AND price_per_sqm <= %(cand_ppsqm)s::int
+                               AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)
+                    / NULLIF(count(*) FILTER (WHERE date >= %(recent_start)s AND price_per_sqm IS NOT NULL
+                               AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s), 0), 1) AS candidate_sqm_pctile
+            FROM {_EPC_VIEW}
             WHERE {where_area} AND date >= %(prior_start)s AND date < %(end_excl)s{type_sql}
         """, params)
         rec = await cur.fetchone()
@@ -220,10 +275,12 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
         """, params)
         hist = await cur.fetchone()
 
-        # 3) national typical for this property type (trailing 12 complete months)
+        # 3) national typical (price + £/m²) for this property type (trailing 12 complete months)
         await cur.execute(f"""
-            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS peer_median
-            FROM market_transactions
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS peer_median,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_sqm)
+                       FILTER (WHERE total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::bigint AS peer_ppsqm
+            FROM {_EPC_VIEW}
             WHERE date >= %(recent_start)s AND date < %(end_excl)s{type_sql}
         """, params)
         peer = await cur.fetchone()
@@ -240,6 +297,17 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                if latest_med and peak_med else None)
     ratio = round(median_recent / peer_median, 2) if median_recent and peer_median else None
 
+    # £/m² — gated on EPC coverage for this area+type
+    sqm_matched = rec["sqm_matched"]
+    sqm_pct, sqm_trust = _coverage(sqm_matched, rec["sales_recent"])
+    area_ppsqm = rec["area_ppsqm"] if sqm_trust else None
+    peer_ppsqm = peer["peer_ppsqm"] if peer else None
+    ppsqm_ratio = (round(area_ppsqm / peer_ppsqm, 2)
+                   if (sqm_trust and area_ppsqm and peer_ppsqm) else None)
+    median_floor_area = float(rec["median_floor_area"]) if rec["median_floor_area"] else None
+    median_rooms = float(rec["median_habitable_rooms"]) if rec["median_habitable_rooms"] else None
+    typical_rating = rec["typical_rating"]
+
     candidate = None
     if cand is not None:
         pctile = rec["candidate_pctile"]
@@ -251,6 +319,17 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                              "around the local going rate",
                              "toward the pricier end of recent local sales"),
         }
+        if cand_ppsqm is not None:   # user supplied a floor area
+            sqm_pctile = rec["candidate_sqm_pctile"]
+            candidate["floor_area_m2"] = cand_fa
+            candidate["price_per_sqm"] = cand_ppsqm
+            candidate["sqm_percentile"] = float(sqm_pctile) if sqm_pctile is not None else None
+            candidate["sqm_verdict"] = (
+                _band(float(sqm_pctile), 35, 65,
+                      "good value per m² — cheaper than most recent local sales",
+                      "around the local £/m² going rate",
+                      "expensive per m² vs recent local sales")
+                if (sqm_trust and sqm_pctile is not None) else None)
 
     return {
         "area": area, "area_level": area_level,
@@ -273,11 +352,30 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                              "around the national typical", "pricier than the national typical")
             if ratio is not None else None,
         },
+        "vs_sqm": {
+            "area_median_ppsqm": area_ppsqm,
+            "national_ppsqm": peer_ppsqm if sqm_trust else None,
+            "ratio_to_national_ppsqm": ppsqm_ratio,
+            "median_floor_area_m2": round(median_floor_area) if (sqm_trust and median_floor_area) else None,
+            "typical_habitable_rooms": median_rooms if sqm_trust else None,  # size proxy, NOT bedrooms
+            "verdict": _band(ppsqm_ratio, 0.85, 1.15, "cheaper per m² than the national typical",
+                             "around the national typical per m²", "pricier per m² than the national typical")
+            if ppsqm_ratio is not None else None,
+            "coverage": {"matched_sales": sqm_matched, "recent_sales": rec["sales_recent"],
+                         "match_pct": sqm_pct, "trustworthy": sqm_trust},
+        },
+        "energy": ({"typical_rating": typical_rating,
+                    "note": "modal EPC rating of recent EPC-matched sales (A=most efficient … G=least); "
+                            "a proxy for running costs and EPC-C upgrade exposure, not the candidate's own rating."}
+                   if (sqm_trust and typical_rating) else None),
         "candidate": candidate,
-        "data_note": ("Value here is RELATIVE to the market (the area's own history, national "
-                      "peers, and the local price distribution). It is NOT an intrinsic £/m² "
-                      "valuation — Land Registry has no floor area or bedroom count (planned via "
-                      "EPC data)."),
+        "data_note": ("Relative value (the area's own history, national peers, the local price "
+                      "distribution)"
+                      + (f", plus £/m² vs the national typical from EPC-matched sales "
+                         f"(~{sqm_pct}% of recent local sales matched)." if sqm_trust
+                         else " — £/m² is not shown here: too few recent sales are EPC-matched to be reliable.")
+                      + " Bedroom counts are not in the data; habitable rooms is only an approximate "
+                        "size proxy, not a bedroom count."),
         "meta": {"last_complete_month": lcm.isoformat(),
                  "incomplete_recent": False},
     }
@@ -386,19 +484,26 @@ async def scan_market(conn, focus="falling", area_level="both", limit=12):
 
 async def find_affordable_areas(conn, budget, area_scope="all", county=None,
                                 property_type="any", tenure="any",
-                                min_transactions=100, limit=12):
+                                min_floor_area=None, max_floor_area=None,
+                                sort="affordability", min_transactions=100, limit=12):
     """Given a BUDGET, find where it actually buys (and where it goes furthest = best value).
-    Per area: % of recent sales within budget (the budget's percentile = the value signal),
-    the median (and flat median), and whether the median fits. Filterable by property_type
-    (house = detached/semi/terraced, flat, or a specific type) and tenure (freehold/leasehold).
-    Uses ABSOLUTE price vs budget (NOT current-vs-peak). NB: Land Registry has no bedroom
-    count or floor area, so this CANNOT filter by bedrooms or compute £/m²."""
+    Per area: % of recent sales within budget (the value signal), the median (and flat median),
+    whether the median fits, AND the median £/m² from EPC-matched sales. Filterable by
+    property_type (house/flat/specific) and tenure (freehold/leasehold). An OPTIONAL floor-area
+    band (min/max m²) adds matched-only size-aware figures WITHOUT shrinking the headline budget
+    answer (which stays over all sales). sort='ppsqm' ranks areas by cheapest median £/m².
+    Uses ABSOLUTE price vs budget. NB: £/m² and size come from EPC-matched sales only (partial
+    coverage); habitable rooms is an approximate size proxy, NOT a bedroom count."""
     budget = int(budget)
+    sort = "ppsqm" if str(sort).lower() == "ppsqm" else "affordability"
+    min_fa = float(min_floor_area) if min_floor_area else None
+    max_fa = float(max_floor_area) if max_floor_area else None
     lcm = await _last_complete_month(conn)
     end = _month_first(lcm or date.today())
     start = end - relativedelta(months=11)  # 12 complete months
     params = {"budget": budget, "start": start, "end_excl": end + relativedelta(months=1),
-              "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 30))}
+              "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 30)),
+              "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_fa": min_fa, "max_fa": max_fa}
     filters = []
     pg = _PGROUP_SQL.get(property_type)
     if pg:
@@ -422,40 +527,69 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
         area_expr, area_level = "district", "'district'"
         scope_filter = "UPPER(county) = 'GREATER LONDON' AND district IS NOT NULL"
 
+    # Rank by cheapest £/m² only over areas with enough EPC matches to be meaningful.
+    sqm_having = ("" if sort != "ppsqm" else
+                  " AND count(*) FILTER (WHERE price_per_sqm IS NOT NULL "
+                  "AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s) >= 30")
+    order_by = ("median_ppsqm ASC NULLS LAST, pct_within_budget DESC" if sort == "ppsqm"
+                else "pct_within_budget DESC, median ASC")
+    # Floor-area band predicate (matched rows only). NULL params => always-true (no filter).
+    # ::numeric casts so Postgres can type the bound parameter when it's NULL.
+    band = ("total_floor_area IS NOT NULL "
+            "AND (%(min_fa)s::numeric IS NULL OR total_floor_area >= %(min_fa)s::numeric) "
+            "AND (%(max_fa)s::numeric IS NULL OR total_floor_area <= %(max_fa)s::numeric)")
     sql = f"""
         WITH base AS (
-            SELECT {area_expr} AS area, {area_level} AS area_level, price, property_type
-            FROM market_transactions
+            SELECT {area_expr} AS area, {area_level} AS area_level, price, property_type,
+                   price_per_sqm, total_floor_area, habitable_rooms
+            FROM {_EPC_VIEW}
             WHERE date >= %(start)s AND date < %(end_excl)s AND {scope_filter}{seg}
         )
         SELECT area, area_level, count(*)::int AS sales,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS median,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY price) FILTER (WHERE property_type='F')::bigint AS median_flat,
                round(100.0 * count(*) FILTER (WHERE price <= %(budget)s) / count(*), 1) AS pct_within_budget,
-               (percentile_cont(0.5) WITHIN GROUP (ORDER BY price) <= %(budget)s) AS median_within_budget
+               (percentile_cont(0.5) WITHIN GROUP (ORDER BY price) <= %(budget)s) AS median_within_budget,
+               -- EPC £/m² + size (matched sales only; sanity band on floor area)
+               count(*) FILTER (WHERE price_per_sqm IS NOT NULL
+                                AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::int AS sqm_matched,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price_per_sqm)
+                   FILTER (WHERE total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::bigint AS median_ppsqm,
+               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY habitable_rooms)
+                   FILTER (WHERE habitable_rooms > 0)::numeric, 1) AS median_habitable_rooms,
+               -- soft floor-area band: matched-only, does NOT shrink the headline pct_within_budget
+               count(*) FILTER (WHERE {band})::int AS sqm_in_band,
+               round(100.0 * count(*) FILTER (WHERE price <= %(budget)s AND {band})
+                     / NULLIF(count(*) FILTER (WHERE {band}), 0), 1) AS pct_in_band_within_budget
         FROM base
         GROUP BY area, area_level
-        HAVING count(*) >= %(min_tx)s
-        ORDER BY pct_within_budget DESC, median ASC
+        HAVING count(*) >= %(min_tx)s{sqm_having}
+        ORDER BY {order_by}
         LIMIT %(limit)s
     """
     async with conn.cursor(row_factory=dict_row) as cur:
         await cur.execute(sql, params)
         rows = await cur.fetchall()
+    for r in rows:
+        r["sqm_match_pct"] = round(100.0 * r["sqm_matched"] / r["sales"], 1) if r["sales"] else None
     any_fit = any(r["median_within_budget"] for r in rows)
+    size_on = bool(min_fa or max_fa)
     return {
-        "budget": budget, "area_scope": area_scope,
+        "budget": budget, "area_scope": area_scope, "sort": sort,
         "property_type": property_type, "tenure": tenure,
+        "size_filter": {"min_m2": min_fa, "max_m2": max_fa} if size_on else None,
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "any_area_median_within_budget": any_fit,
         "note": (None if any_fit else
                  "No area in this scope has a median at/below the budget — it only reaches the "
                  "cheaper end (see pct_within_budget and median_flat). Consider cheaper property "
                  "types, a wider area_scope, or areas outside this scope."),
-        "data_note": ("Land Registry has no bedroom count or floor area: results are NOT filtered "
-                      "by bedrooms and there is no £/m² value figure. 'pct_within_budget' is the "
-                      "budget's percentile for the chosen type+tenure (higher = your money buys a "
-                      "more typical/better home there = better value)."),
+        "data_note": ("'pct_within_budget' is the budget's percentile across ALL sales (full "
+                      "coverage) for the chosen type+tenure — higher = your money buys a more "
+                      "typical/better home there. 'median_ppsqm' and any size-band figures "
+                      "(sqm_in_band / pct_in_band_within_budget) use EPC-matched sales only "
+                      "(see sqm_match_pct per area) — treat as indicative. Habitable rooms is an "
+                      "approximate size proxy, NOT a bedroom count; results are not filtered by bedrooms."),
         "results": rows,
         "meta": {"last_complete_month": lcm.isoformat() if lcm else None},
     }

@@ -29,6 +29,15 @@ FROM get_data_freshness();
 "
 echo
 
+# EPC match coverage (share of sold transactions matched to an EPC certificate -> £/m²)
+echo "🏷️  EPC match coverage:"
+docker-compose exec -T postgres psql -U prices -d house_prices -tAc "
+SELECT '   matched ' || COALESCE(round(100.0*sum(matched_txns)/NULLIF(sum(total_txns),0),1),0) || '% of sales'
+       || ' (since 2008: ' || COALESCE(round(100.0*sum(matched_txns) FILTER (WHERE year >= DATE '2008-01-01')
+            / NULLIF(sum(total_txns) FILTER (WHERE year >= DATE '2008-01-01'),0),1),0) || '%)'
+FROM epc_match_coverage;" 2>/dev/null || echo "   (epc_match_coverage not present — apply 03_epc_schema.sql)"
+echo
+
 # Check disk usage
 echo "💾 Disk Usage:"
 docker-compose exec -T postgres du -sh /var/lib/postgresql/data

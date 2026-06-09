@@ -41,9 +41,14 @@ def _strip_unmentioned_dates(question: str, args: dict) -> dict:
 _BUDGET_INTENT = re.compile(
     r"\b(afford|budget|best value|value for money|for my money|cheapest|"
     r"where (?:can|could|should|to|would|do|'?s)|spend|looking to (?:buy|spend)|"
-    r"buy a|get for|stretch|i (?:had|have|'ve got|got))\b", re.I)
+    r"buy a|get for|stretch|i (?:had|have|'ve got|got)|"
+    r"what (?:can|does|will|would|could)[^?]{0,25}buys?)\b", re.I)
 # £200k · £200,000 · 200k · 200 grand · 200000 · 1.5m
 _MONEY_RE = re.compile(r"£?\s*(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k|grand|m|mil|million)?\b", re.I)
+# Floor-area size tokens ("70 m²", "60-90 sqm") — EPC-backed; numbers here are never a budget (<10k).
+_SIZE_UNIT = r"(?:m2|m²|sqm|sq\s?m|square\s?met(?:re|er)s?)"
+_SIZE_RANGE_RE = re.compile(rf"\b(\d{{2,4}})\s*(?:-|to|–|—)\s*(\d{{2,4}})\s*{_SIZE_UNIT}\b", re.I)
+_SIZE_ONE_RE = re.compile(rf"\b(\d{{2,4}})\s*{_SIZE_UNIT}\b", re.I)
 
 
 def _extract_budget(question: str):
@@ -86,7 +91,18 @@ def _budget_route(question: str):
         ptype = "terraced"
     else:
         ptype = "any"
-    return {"budget": budget, "area_scope": scope, "property_type": ptype, "tenure": tenure}
+    args = {"budget": budget, "area_scope": scope, "property_type": ptype, "tenure": tenure}
+    # Optional floor-area size in a budget question ("60-90 m²", "around 70 sqm") — EPC-backed.
+    rng = _SIZE_RANGE_RE.search(ql)
+    if rng:
+        lo, hi = sorted((int(rng.group(1)), int(rng.group(2))))
+        args["min_floor_area"], args["max_floor_area"] = float(lo), float(hi)
+    else:
+        one = _SIZE_ONE_RE.search(ql)
+        if one:
+            v = int(one.group(1))
+            args["min_floor_area"], args["max_floor_area"] = float(round(v * 0.85)), float(round(v * 1.15))
+    return args
 
 PLANNER_SYS = """You are the planning step of a UK house-price analytics agent. The database holds \
 HM Land Registry SOLD prices for England & Wales, 1995-present (no rentals, no asking prices, no forecasts).
@@ -110,10 +126,15 @@ Rules — match the user's intent to ONE tool:
   price/type. Needs a SPECIFIC county or London borough — never a country/region.
 - "Where should I look?", "where are prices rising / falling?", "where are the cheapest areas?":
   scan_market with focus = falling / rising / cheapest.
+- £/m², floor area, "value per m²", "is £X for an N m² place good value", "cheapest by £/m²":
+  these are VALUE questions. ONE area or a specific price+size -> assess_value (pass candidate_price
+  AND candidate_floor_area when the user gives a size). "Cheapest/best value per m² across areas" or a
+  size-constrained budget -> find_affordable_areas (sort='ppsqm', min_floor_area/max_floor_area). £/m²
+  comes from EPC-matched sales only — never route to scan_market for it.
 - "How fresh / how complete is the data?": get_data_coverage.
 - A novel cut the tools don't cover (postcode/outcode grouping, custom percentile): run_sql.
 - Area names match Land Registry values: counties like KENT, SURREY, WEST MIDLANDS; London boroughs
-  like BROMLEY, BEXLEY. There is NO bedroom or floor-area data — never filter by bedrooms or compute £/m².
+  like BROMLEY, BEXLEY. There is still NO bedroom count — never filter by bedrooms.
 - Only pass date parameters the user EXPLICITLY names; otherwise omit them (tools default to the
   latest complete data). NEVER assume today's date. Do not repeat a call already in the observations.
 - When you have enough numbers, return {{"final": true}}."""
@@ -130,10 +151,15 @@ Rules:
   budget. If no area's median fits (any_area_median_within_budget=false), say so plainly — point to where
   the budget reaches the most stock (highest pct_within_budget, e.g. cheaper flats) and/or suggest cheaper
   property types or areas outside the scope. Never imply an over-budget area suits the budget.
-- NO BEDROOM / SIZE DATA: never claim results are filtered by number of bedrooms, and never report a
-  £/m² or price-per-bedroom figure — that data isn't in Land Registry. If the user asked for a bedroom
-  count or per-size value, give the budget/tenure/type answer you DO have and note that bedroom and
-  floor-area filtering isn't available yet (planned via EPC data).
+- £/m² & SIZE (EPC-matched, PARTIAL coverage): report a £/m² figure ONLY when the observations supply
+  one (vs_sqm / median_ppsqm), and ALWAYS state it's from EPC-matched sales with the coverage (e.g.
+  "£/m² based on ~68% of recent sales"). If the figure is null or coverage.trustworthy is false, DO NOT
+  report £/m² — give the price-based value answer (history / peers / local percentile) and say £/m²
+  isn't reliable enough here. Never invent or extrapolate a £/m² or floor area.
+- BEDROOMS ARE NOT IN THE DATA: EPC gives "habitable rooms" (living rooms + kitchen + bedrooms), NOT a
+  bedroom count. You may mention habitable rooms as an APPROXIMATE size proxy, explicitly noting it is
+  not the bedroom count, but NEVER claim results are filtered by bedrooms or imply an exact bedroom match.
+- ENERGY RATING: if an energy rating is provided, you may note it as a running-cost / EPC-C signal.
 - {caveat}"""
 
 CAVEAT_ON = ("One or more figures cover a very recent month; HM Land Registry data is registered with a lag, "

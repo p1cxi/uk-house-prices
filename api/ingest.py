@@ -1,9 +1,12 @@
 import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
+from datetime import date
+
 from .config import DB_CONFIG  # noqa: F401 — also triggers sys.path setup for ingest import
 from .state import _summary_cache, jobs
 from ingest import LandRegistryIngestor
+from epc_ingest import EpcIngestor
 
 router = APIRouter()
 
@@ -57,6 +60,35 @@ async def ingest_backfill(background_tasks: BackgroundTasks):
         try:
             await LandRegistryIngestor().ingest_backfill()
             jobs[job_id] = {"status": "complete"}
+            _summary_cache.clear()
+        except Exception as e:
+            jobs[job_id] = {"status": "failed", "error": str(e)}
+
+    background_tasks.add_task(_job)
+    return {"job_id": job_id, "status": "accepted"}
+
+
+@router.post("/ingest/epc/incremental", status_code=202)
+async def ingest_epc_incremental(background_tasks: BackgroundTasks, since: str | None = None):
+    """Quarterly EPC top-up via the developer API (needs EPC_API_EMAIL/KEY in .env).
+    The one-time full load is a manual bulk download run via the epc-ingest CLI, not here."""
+    job_id = "epc"
+    if jobs.get(job_id, {}).get("status") == "running":
+        raise HTTPException(409, "EPC ingest already running")
+    since_date = None
+    if since:
+        try:
+            since_date = date.fromisoformat(since)
+        except ValueError:
+            raise HTTPException(400, "since must be YYYY-MM-DD")
+
+    async def _job():
+        jobs[job_id] = {"status": "running"}
+        try:
+            ing = EpcIngestor()
+            await ing.ingest_api_incremental(since_date)
+            await ing.refresh_epc()
+            jobs[job_id] = {"status": "complete", "stats": ing.stats}
             _summary_cache.clear()
         except Exception as e:
             jobs[job_id] = {"status": "failed", "error": str(e)}

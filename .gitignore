@@ -68,3 +68,7 @@ backup_*.sql.gz
 # csv files
 
 postcode_csv/**/*.csv
+
+# EPC bulk download (GOV.UK One Login, ~5.6GB) — never committed; repo is public
+epc_data/
+uk-house-prices-roadmap.md

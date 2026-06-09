@@ -92,6 +92,34 @@ services:
       profiles:
         - postcode
 
+  # One-time EPC bulk load: drop the GOV.UK One Login download under ./epc_data, then
+  #   docker compose run --rm epc-ingest python epc_ingest.py --mode bulk
+  epc-ingest:
+      build:
+        context: ./ingest
+        dockerfile: Dockerfile
+      container_name: house_prices_epc_ingest
+      dns:
+        - 1.1.1.1
+        - 8.8.8.8
+      environment:
+        POSTGRES_HOST: postgres
+        POSTGRES_DB: ${POSTGRES_DB:-house_prices}
+        POSTGRES_USER: ${POSTGRES_USER:-prices}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        EPC_DIR: /app/epc_data
+        EPC_API_EMAIL: ${EPC_API_EMAIL:-}
+        EPC_API_KEY: ${EPC_API_KEY:-}
+      volumes:
+        - ./epc_data:/app/epc_data:ro
+      networks:
+        - house_prices_net
+      depends_on:
+        postgres:
+          condition: service_healthy
+      profiles:
+        - epc
+
   api:
     build:
       context: .
@@ -115,6 +143,9 @@ services:
       AGENT_MAX_ROWS: ${AGENT_MAX_ROWS:-25}
       AGENT_SQL_ROW_LIMIT: ${AGENT_SQL_ROW_LIMIT:-500}
       AGENT_TOOL_MODE: ${AGENT_TOOL_MODE:-structured}
+      # EPC developer API (quarterly /ingest/epc/incremental top-ups; bulk load is offline)
+      EPC_API_EMAIL: ${EPC_API_EMAIL:-}
+      EPC_API_KEY: ${EPC_API_KEY:-}
     volumes:
       - ./logs:/app/logs
     ports:

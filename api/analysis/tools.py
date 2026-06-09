@@ -53,14 +53,23 @@ TOOLS = [
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
          "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
          "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
-         "county. Do NOT default to London. "
-         "NB: no bedroom count or floor area in the data — cannot filter by bedrooms or give £/m².",
+         "county. Do NOT default to London. Also returns each area's median £/m² (EPC-matched "
+         "sales only — see sqm_match_pct); supports an optional floor-area band "
+         "(min_floor_area/max_floor_area, m²) and sort='ppsqm' (rank by cheapest £/m²). Use "
+         "sort='ppsqm' for 'cheapest/best value per square metre'. NB: £/m² & size are EPC-matched "
+         "only; there is still NO bedroom count (habitable rooms is an approximate proxy, not bedrooms).",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
                "area_scope": {"type": "string", "enum": ["all", "london", "county"], "default": "all",
                               "description": "all = nationwide (England & Wales, the default); london = Greater London boroughs (~within M25), use only if the user says London/M25; county = districts in one county (set 'county')"},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
+               "min_floor_area": {"type": "number", "minimum": 10,
+                                  "description": "optional min total floor area in m² (EPC-matched sales only)"},
+               "max_floor_area": {"type": "number", "minimum": 10,
+                                  "description": "optional max total floor area in m²"},
+               "sort": {"type": "string", "enum": ["affordability", "ppsqm"], "default": "affordability",
+                        "description": "ppsqm = rank areas by lowest median £/m² (EPC-matched)"},
                "min_transactions": {"type": "integer", "default": 100, "minimum": 0},
                "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": 30}},
               required=["budget"])),
@@ -70,15 +79,19 @@ TOOLS = [
          "(county like KENT or London borough like BROMLEY) and optionally a candidate_price "
          "(+property_type) you're weighing up. Triangulates value three ways: vs the area's OWN "
          "history (how far below/above its peak, 12-month direction), vs PEERS (its median vs the "
-         "national typical for that type), and — if candidate_price is given — where that price "
-         "sits in the LOCAL distribution (its percentile). USE THIS for 'is X good value?', 'am I "
-         "overpaying?', 'is £350k for a semi in Bromley fair?'. Value is RELATIVE to the market, "
-         "NOT intrinsic £/m² (no floor area in the data).",
+         "national typical for that type), where that price sits in the LOCAL distribution (its "
+         "percentile if candidate_price given), AND £/m² (EPC-matched sales): the area's median "
+         "£/m² vs national, plus the candidate's own £/m² if you pass candidate_floor_area. Also "
+         "reports the area's typical energy rating. USE THIS for 'is X good value?', 'am I "
+         "overpaying?', 'is £350k for a 70 m² flat in Bromley fair?', '£ per m² in Bromley?'. £/m² "
+         "is EPC-matched-only (coverage reported, suppressed if too thin); bedroom counts are not available.",
          _obj({"area": {"type": "string", "description": "a county (e.g. KENT) or London borough (e.g. BROMLEY)"},
                "area_level": _AREA_LEVEL,
                "property_type": _PTYPE_GROUP,
                "candidate_price": {"type": "integer", "minimum": 1000,
-                                   "description": "optional asking price (GBP) to judge against local sales"}},
+                                   "description": "optional asking price (GBP) to judge against local sales"},
+               "candidate_floor_area": {"type": "number", "minimum": 10,
+                                        "description": "optional floor area (m²) of the specific property, to compute its £/m²"}},
               required=["area"])),
 
     Tool("scan_market",
@@ -102,7 +115,8 @@ TOOLS = [
     Tool("run_sql",
          "Escape hatch: run a single read-only SELECT against the schema for questions "
          "the other tools don't cover (e.g. grouping by postcode/outcode). Tables: "
-         "transactions, postcodes, market_transactions (clean view), monthly_price_stats.",
+         "transactions, postcodes, market_transactions (clean view), market_transactions_epc "
+         "(adds EPC floor area / price_per_sqm / energy rating, partial coverage), monthly_price_stats.",
          _obj({"sql": {"type": "string"}, "max_rows": {"type": "integer", "minimum": 1}},
               required=["sql"]),
          timeout_ms=_RUN_SQL_TIMEOUT_MS),
