@@ -81,16 +81,20 @@ def _budget_route(question: str):
     # property_type ONLY from a SPECIFIC type word. Bare "house" is deliberately left 'any':
     # it's usually generic ("buy a house"), and a £200k 2-bed is mostly flats — narrowing to
     # houses would hide exactly the stock that fits the budget (the wrong-narrowing trap).
-    if re.search(r"\b(flat|flats|apartment|apartments)\b", ql):
-        ptype = "flat"
-    elif re.search(r"\bdetached\b", ql):
-        ptype = "detached"
-    elif re.search(r"\bsemi[- ]?detached\b|\bsemi\b", ql):
-        ptype = "semi"
-    elif re.search(r"\b(terraced|terrace)\b", ql):
-        ptype = "terraced"
-    else:
-        ptype = "any"
+    # Collect ALL specific types named (so "flats or terraced" -> ['flat','terraced']). Strip
+    # "semi-detached" before the bare-detached test so it isn't double-counted as detached.
+    types = []
+    if re.search(r"\b(flats?|apartments?)\b", ql):
+        types.append("flat")
+    if re.search(r"\bsemi[- ]?detached\b|\bsemis?\b", ql):
+        types.append("semi")
+    if re.search(r"\bterraced?\b", ql):
+        types.append("terraced")
+    if re.search(r"\bdetached\b", re.sub(r"semi[- ]?detached", "", ql)):
+        types.append("detached")
+    # Bare "house" is deliberately left as 'any' (the wrong-narrowing trap: a £200k 2-bed is mostly
+    # flats, so narrowing to houses would hide the stock that fits the budget).
+    ptype = types or "any"
     args = {"budget": budget, "area_scope": scope, "property_type": ptype, "tenure": tenure}
     # new-build vs resale, only on an explicit word (don't infer from a bare "new").
     if re.search(r"\bnew[- ]?builds?\b|\bnewbuild\b", ql):
@@ -124,8 +128,9 @@ Rules — match the user's intent to ONE tool:
 - BUDGET / "what can I afford" / "where does £X go" / "best value for my money" / "under £X":
   find_affordable_areas. Set area_scope by geography: 'london' for London / "within the M25";
   'county' (+county) for a named county; 'all' for nationwide / "England" / "UK" / "anywhere".
-  Pass property_type ('house'/'flat'/a specific type), tenure ('freehold'/'leasehold') and new_build
-  ('new' for new-builds, 'resale' for existing/second-hand) only when the user names them; otherwise 'any'.
+  Pass property_type as a LIST of one or more types (e.g. ['flat'] or ['flat','terraced'] for "flats or
+  terraced houses"), tenure ('freehold'/'leasehold') and new_build ('new'/'resale') only when the user
+  names them; otherwise leave them at their defaults (['any'] / 'any').
 - "Is X good value / overpriced?", "am I overpaying?", "is £Y for a <type> in <area> fair?":
   assess_value. Pass the specific area; add candidate_price (+property_type) when the user names a
   price/type. Needs a SPECIFIC county or London borough — never a country/region.

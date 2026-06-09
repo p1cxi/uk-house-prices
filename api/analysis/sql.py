@@ -32,13 +32,38 @@ from psycopg.rows import dict_row
 from ..config import AGENT_SQL_ROW_LIMIT
 from .guards import validate_readonly_sql, wrap_with_limit
 
-# Property-type groups shared by find_affordable_areas and assess_value.
-_PGROUP_SQL = {"house": "property_type IN ('D','S','T')", "flat": "property_type = 'F'",
-               "detached": "property_type = 'D'", "semi": "property_type = 'S'",
-               "terraced": "property_type = 'T'", "other": "property_type = 'O'"}
-_PTYPE_FRIENDLY = {"any": "all property types", "house": "houses (detached/semi/terraced)",
-                   "flat": "flats", "detached": "detached houses", "semi": "semi-detached houses",
-                   "terraced": "terraced houses", "other": "other property types"}
+# Property types (shared by find_affordable_areas + assess_value). Each friendly token maps to
+# one or more PPD property_type codes (D=detached, S=semi, T=terraced, F=flat, O=other). The
+# property_type arg accepts a SINGLE token OR a LIST of tokens (OR'd together) so the model can
+# pick and choose (e.g. ["flat","terraced"]); 'any' (or empty) means no filter.
+_PTYPE_CODES = {"house": ("D", "S", "T"), "flat": ("F",), "detached": ("D",),
+                "semi": ("S",), "terraced": ("T",), "other": ("O",)}
+_PTYPE_ONE_LABEL = {"any": "all property types", "house": "houses (detached/semi/terraced)",
+                    "flat": "flats", "detached": "detached houses", "semi": "semi-detached houses",
+                    "terraced": "terraced houses", "other": "other property types"}
+
+
+def _ptype_tokens(property_type):
+    """Normalise the property_type arg (str | list | None) to a list of lowercased tokens."""
+    if property_type is None:
+        return []
+    items = [property_type] if isinstance(property_type, str) else list(property_type)
+    return [str(x).strip().lower() for x in items if x not in (None, "")]
+
+
+def _ptype_codes(tokens):
+    """The PPD codes to filter on for these tokens, or None for 'no filter' (any/empty/unknown)."""
+    if not tokens or "any" in tokens:
+        return None
+    codes = sorted({c for t in tokens for c in _PTYPE_CODES.get(t, ())})
+    return codes or None
+
+
+def _ptype_label(tokens):
+    """Human label for one or more property-type tokens ('flats or terraced houses')."""
+    if not tokens or "any" in tokens:
+        return "all property types"
+    return " or ".join(_PTYPE_ONE_LABEL.get(t, t) for t in tokens)
 
 # EPC-enriched view (market_transactions + matched floor area / £-per-m² / energy rating,
 # NULL where unmatched). EPC coverage is PARTIAL, so £/m² is always reported with its match
@@ -76,12 +101,17 @@ def _country_guard(area):
 
 
 def _area_where(area_level: str, param: str = "area") -> str:
+    # HM Land Registry county/district are already stored UPPERCASE (verified: 0 of ~31M rows
+    # are mixed-case), so UPPER() goes on the BOUND PARAM only — never the column. Wrapping the
+    # column (UPPER(county)=...) defeats the plain b-tree idx_transactions_county/_district and
+    # forces a parallel seq scan of the whole transactions table (~6s/query for a London borough);
+    # comparing the raw column lets the planner use the index (bitmap scan, ~5x faster).
     if area_level == "county":
-        return f"UPPER(county) = UPPER(%({param})s)"
+        return f"county = UPPER(%({param})s)"
     if area_level == "district":
-        return f"UPPER(district) = UPPER(%({param})s)"
-    return (f"(UPPER(county) = UPPER(%({param})s) "
-            f"OR (UPPER(county) = 'GREATER LONDON' AND UPPER(district) = UPPER(%({param})s)))")
+        return f"district = UPPER(%({param})s)"
+    return (f"(county = UPPER(%({param})s) "
+            f"OR (county = 'GREATER LONDON' AND district = UPPER(%({param})s)))")
 
 
 def _month_first(d: date) -> date:
@@ -213,12 +243,11 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
     cand_fa = float(candidate_floor_area) if candidate_floor_area else None
     cand_ppsqm = round(cand / cand_fa) if (cand and cand_fa and cand_fa > 0) else None
     where_area = _area_where(area_level)
-    type_sql = ""
-    pg = _PGROUP_SQL.get(property_type)
-    if pg:
-        type_sql = " AND " + pg
+    tokens = _ptype_tokens(property_type)
+    pt_codes = _ptype_codes(tokens)
+    type_sql = " AND property_type = ANY(%(ptypes)s)" if pt_codes else ""
     params = {"area": area, "recent_start": recent_start, "prior_start": prior_start,
-              "end_excl": end_excl, "cand": cand, "cand_ppsqm": cand_ppsqm,
+              "end_excl": end_excl, "cand": cand, "cand_ppsqm": cand_ppsqm, "ptypes": pt_codes,
               "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_month_tx": 30}
 
     async with conn.cursor(row_factory=dict_row) as cur:
@@ -281,7 +310,7 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
 
         if not rec or not rec["sales_recent"]:
             return {"error": f"No recent sales found for '{area}'"
-                             + (f" ({_PTYPE_FRIENDLY.get(property_type, property_type)})" if pg else "")
+                             + (f" ({_ptype_label(tokens)})" if pt_codes else "")
                              + ". Use a known county (e.g. KENT) or London borough (e.g. BROMLEY); "
                                "for nationwide/budget questions use find_affordable_areas or scan_market."}
 
@@ -396,7 +425,7 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
 
     return {
         "area": area, "area_level": area_level,
-        "property_type": property_type, "property_type_label": _PTYPE_FRIENDLY.get(property_type, property_type),
+        "property_type": property_type, "property_type_label": _ptype_label(tokens),
         "window": {"from": recent_start.isoformat(), "to": end.isoformat()},
         "typical_price_now": median_recent, "recent_sales": rec["sales_recent"],
         "vs_history": {
@@ -458,8 +487,8 @@ async def _yoy_movers(conn, lcm: date, direction="gainers", min_transactions=50,
               "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 25))}
     sql = f"""
         WITH area_data AS (
-            SELECT CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END AS area,
-                   CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
+            SELECT CASE WHEN county='GREATER LONDON' THEN district ELSE county END AS area,
+                   CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
                    count(*) FILTER (WHERE date >= %(m0)s AND date < %(m1)s) AS transactions,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY price)
                        FILTER (WHERE date >= %(m0)s AND date < %(m1)s) AS cur_med,
@@ -493,12 +522,12 @@ async def _cheapest_areas(conn, lcm: date, area_level="both", min_transactions=1
                     "both": "TRUE"}.get(area_level, "TRUE")
     sql = f"""
         WITH base AS (
-            SELECT CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END AS area,
-                   CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
+            SELECT CASE WHEN county='GREATER LONDON' THEN district ELSE county END AS area,
+                   CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
                    price
             FROM market_transactions
             WHERE date >= %(start)s AND date < %(end_excl)s
-              AND (UPPER(county) <> 'GREATER LONDON' OR district IS NOT NULL)
+              AND (county <> 'GREATER LONDON' OR district IS NOT NULL)
         )
         SELECT area, area_level, count(*)::int AS recent_transactions,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS median
@@ -569,10 +598,12 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     params = {"budget": budget, "start": start, "end_excl": end + relativedelta(months=1),
               "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 30)),
               "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_fa": min_fa, "max_fa": max_fa}
+    tokens = _ptype_tokens(property_type)
+    pt_codes = _ptype_codes(tokens)
     filters = []
-    pg = _PGROUP_SQL.get(property_type)
-    if pg:
-        filters.append(pg)
+    if pt_codes:
+        filters.append("property_type = ANY(%(ptypes)s)")
+        params["ptypes"] = pt_codes
     if tenure in ("freehold", "leasehold"):
         filters.append("tenure = %(tenure)s")
         params["tenure"] = "F" if tenure == "freehold" else "L"
@@ -581,19 +612,22 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
         params["nb"] = "Y" if new_build == "new" else "N"
     seg = "".join(" AND " + f for f in filters)
 
+    # county/district are stored UPPERCASE (see _area_where): compare the raw, indexed column and
+    # UPPER() only the bound param. UPPER(column)=... in a scope_filter would defeat
+    # idx_transactions_county_date and force a seq scan (county/london scopes were ~10x slower).
     if area_scope == "county":
         if not county:
             return {"error": "area_scope='county' requires a 'county' name"}
         area_expr, area_level = "district", "'district'"
-        scope_filter = "UPPER(county) = UPPER(%(county)s) AND district IS NOT NULL"
+        scope_filter = "county = UPPER(%(county)s) AND district IS NOT NULL"
         params["county"] = county
     elif area_scope == "all":
-        area_expr = "CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END"
-        area_level = "CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END"
-        scope_filter = "(UPPER(county) <> 'GREATER LONDON' OR district IS NOT NULL)"
+        area_expr = "CASE WHEN county='GREATER LONDON' THEN district ELSE county END"
+        area_level = "CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END"
+        scope_filter = "(county <> 'GREATER LONDON' OR district IS NOT NULL)"
     else:  # 'london' (~ within the M25)
         area_expr, area_level = "district", "'district'"
-        scope_filter = "UPPER(county) = 'GREATER LONDON' AND district IS NOT NULL"
+        scope_filter = "county = 'GREATER LONDON' AND district IS NOT NULL"
 
     # Rank by cheapest £/m² only over areas with enough EPC matches to be meaningful.
     sqm_having = ("" if sort != "ppsqm" else
@@ -644,7 +678,7 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     size_on = bool(min_fa or max_fa)
     if not rows:
         applied = ", ".join(
-            x for x in (f"{property_type}s" if pg else None,
+            x for x in (_ptype_label(tokens) if pt_codes else None,
                         tenure if tenure in ("freehold", "leasehold") else None,
                         f"{new_build}-build" if new_build in ("new", "resale") else None)
             if x)

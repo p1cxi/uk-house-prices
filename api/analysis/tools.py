@@ -22,9 +22,14 @@ _RUN_SQL_TIMEOUT_MS = 8000
 _AREA_LEVEL = {"type": "string", "enum": ["county", "district", "auto"], "default": "auto",
                "description": "county, London-borough district, or auto-detect"}
 # Friendly property-type group shared by the budget + value tools.
-_PTYPE_GROUP = {"type": "string",
-                "enum": ["any", "house", "flat", "detached", "semi", "terraced", "other"],
-                "default": "any", "description": "house = detached/semi/terraced"}
+_PTYPE_GROUP = {"type": "array",
+                "items": {"type": "string",
+                          "enum": ["any", "house", "flat", "detached", "semi", "terraced", "other"]},
+                "default": ["any"],
+                "description": "One or more property types to include, combined with OR. 'house' = "
+                               "detached/semi/terraced; 'flat'; or a specific type. Default ['any'] = "
+                               "all types. Pass several to combine, e.g. ['flat','terraced'] for flats "
+                               "OR terraced houses."}
 
 
 @dataclass(frozen=True)
@@ -49,8 +54,8 @@ TOOLS = [
          "area the % of recent sales within budget (the budget's percentile = the value signal — "
          "higher means your money buys a more typical/better home there), the median + flat "
          "median, and whether the median fits. Filter by tenure (freehold/leasehold), new-build vs "
-         "resale (new_build), and property_type (house = detached/semi/terraced, flat, or a specific "
-         "type). USE THIS for "
+         "resale (new_build), and property_type — one or more of house (=detached/semi/terraced), "
+         "flat, or specific types; pass a LIST like ['flat','terraced'] to combine. USE THIS for "
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
          "'leasehold house under £X'). Set area_scope by geography: 'london' whenever London / "
          "Greater London / the M25 is mentioned — INCLUDING comparatives ('closer to London', "
@@ -161,12 +166,34 @@ _ENUM_ALIASES = {
 }
 
 
+def _coerce_enum(v, enum):
+    """Map a fuzzy string onto an enum value (case-insensitive + _ENUM_ALIASES); pass through otherwise."""
+    if not isinstance(v, str) or not enum or v in enum:
+        return v
+    low = {e.lower(): e for e in enum if isinstance(e, str)}
+    if v.lower() in low:
+        return low[v.lower()]
+    if _ENUM_ALIASES.get(v.lower()) in enum:
+        return _ENUM_ALIASES[v.lower()]
+    return v
+
+
 def _coerce_args(schema: dict, args: dict) -> dict:
     props = schema.get("properties", {})
     out = {}
     for k, v in (args or {}).items():
         spec = props.get(k, {})
         t = spec.get("type")
+        if t == "array":
+            # Small models pass either a bare value or a list for an array param; accept both and
+            # coerce each element against the item enum, so ['Flat','Terrace'] -> ['flat','terraced'].
+            if isinstance(v, str):
+                v = [v]
+            ienum = (spec.get("items") or {}).get("enum")
+            if isinstance(v, list) and ienum:
+                v = [_coerce_enum(x, ienum) for x in v]
+            out[k] = v
+            continue
         is_bool = t == "boolean" or (isinstance(t, list) and "boolean" in t)
         enum = spec.get("enum")
         if isinstance(v, str):
@@ -176,12 +203,8 @@ def _coerce_args(schema: dict, args: dict) -> dict:
                     v = True
                 elif lv in ("false", "0", "no"):
                     v = False
-            elif enum and v not in enum:
-                low = {e.lower(): e for e in enum if isinstance(e, str)}
-                if v.lower() in low:
-                    v = low[v.lower()]
-                elif _ENUM_ALIASES.get(v.lower()) in enum:
-                    v = _ENUM_ALIASES[v.lower()]
+            elif enum:
+                v = _coerce_enum(v, enum)
             elif t == "integer":
                 try:
                     v = int(v)

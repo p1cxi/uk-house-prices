@@ -44,7 +44,7 @@ async def _query_summary_data() -> Tuple[List[Dict], Optional[Dict]]:
             WHERE ppd_type = 'A'
               AND record_status = 'A'
               AND date >= date_trunc('month', CURRENT_DATE) - INTERVAL '13 months'
-              AND UPPER(county) != 'GREATER LONDON'
+              AND county != 'GREATER LONDON'   -- county is stored UPPERCASE; no UPPER() (it defeats the index)
             GROUP BY county
 
             UNION ALL
@@ -68,7 +68,7 @@ async def _query_summary_data() -> Tuple[List[Dict], Optional[Dict]]:
             WHERE ppd_type = 'A'
               AND record_status = 'A'
               AND date >= date_trunc('month', CURRENT_DATE) - INTERVAL '13 months'
-              AND UPPER(county) = 'GREATER LONDON'
+              AND county = 'GREATER LONDON'    -- county is stored UPPERCASE; no UPPER() (it defeats the index)
               AND district IS NOT NULL
             GROUP BY district
         ),
