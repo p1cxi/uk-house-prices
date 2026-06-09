@@ -111,6 +111,12 @@ CASES = [
          expect_tool="find_affordable_areas",
          expect_args={"new_build": "new"}),
 
+    # property_type accepts a LIST — the model should pick BOTH types named (set = "contains all").
+    Case("multi_property_type", "'flats or terraced houses' -> property_type includes flat AND terraced",
+         [u("What can I get for £300k in Surrey — flats or terraced houses?")],
+         expect_tool="find_affordable_areas",
+         expect_args={"budget": 300000, "property_type": {"flat", "terraced"}}),
+
     # --- End-to-end honesty -----------------------------------------------------------------
     Case("e2e_freshness", "'sold this month' answer must carry the registration-lag caveat",
          [u("What sold in Leeds in the last month?")],

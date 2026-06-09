@@ -130,7 +130,14 @@ def first_tool_call(msg):
 
 
 def arg_ok(expected, actual):
-    """expected may be a literal, None (= arg should be absent), or a list (= any-of)."""
+    """expected may be a literal, None (= arg should be absent), a list (= any-of), or a set
+    (= the actual array must CONTAIN all members, case-insensitively)."""
+    if isinstance(expected, set):
+        if actual is None:
+            return False
+        items = actual if isinstance(actual, (list, tuple)) else [actual]
+        norm = {str(a).strip().lower() for a in items}
+        return {str(e).strip().lower() for e in expected}.issubset(norm)
     if isinstance(expected, (list, tuple)):
         return any(arg_ok(e, actual) for e in expected)
     if expected is None:

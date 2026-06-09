@@ -32,13 +32,38 @@ from psycopg.rows import dict_row
 from ..config import AGENT_SQL_ROW_LIMIT
 from .guards import validate_readonly_sql, wrap_with_limit
 
-# Property-type groups shared by find_affordable_areas and assess_value.
-_PGROUP_SQL = {"house": "property_type IN ('D','S','T')", "flat": "property_type = 'F'",
-               "detached": "property_type = 'D'", "semi": "property_type = 'S'",
-               "terraced": "property_type = 'T'", "other": "property_type = 'O'"}
-_PTYPE_FRIENDLY = {"any": "all property types", "house": "houses (detached/semi/terraced)",
-                   "flat": "flats", "detached": "detached houses", "semi": "semi-detached houses",
-                   "terraced": "terraced houses", "other": "other property types"}
+# Property types (shared by find_affordable_areas + assess_value). Each friendly token maps to
+# one or more PPD property_type codes (D=detached, S=semi, T=terraced, F=flat, O=other). The
+# property_type arg accepts a SINGLE token OR a LIST of tokens (OR'd together) so the model can
+# pick and choose (e.g. ["flat","terraced"]); 'any' (or empty) means no filter.
+_PTYPE_CODES = {"house": ("D", "S", "T"), "flat": ("F",), "detached": ("D",),
+                "semi": ("S",), "terraced": ("T",), "other": ("O",)}
+_PTYPE_ONE_LABEL = {"any": "all property types", "house": "houses (detached/semi/terraced)",
+                    "flat": "flats", "detached": "detached houses", "semi": "semi-detached houses",
+                    "terraced": "terraced houses", "other": "other property types"}
+
+
+def _ptype_tokens(property_type):
+    """Normalise the property_type arg (str | list | None) to a list of lowercased tokens."""
+    if property_type is None:
+        return []
+    items = [property_type] if isinstance(property_type, str) else list(property_type)
+    return [str(x).strip().lower() for x in items if x not in (None, "")]
+
+
+def _ptype_codes(tokens):
+    """The PPD codes to filter on for these tokens, or None for 'no filter' (any/empty/unknown)."""
+    if not tokens or "any" in tokens:
+        return None
+    codes = sorted({c for t in tokens for c in _PTYPE_CODES.get(t, ())})
+    return codes or None
+
+
+def _ptype_label(tokens):
+    """Human label for one or more property-type tokens ('flats or terraced houses')."""
+    if not tokens or "any" in tokens:
+        return "all property types"
+    return " or ".join(_PTYPE_ONE_LABEL.get(t, t) for t in tokens)
 
 # EPC-enriched view (market_transactions + matched floor area / £-per-m² / energy rating,
 # NULL where unmatched). EPC coverage is PARTIAL, so £/m² is always reported with its match
@@ -213,12 +238,11 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
     cand_fa = float(candidate_floor_area) if candidate_floor_area else None
     cand_ppsqm = round(cand / cand_fa) if (cand and cand_fa and cand_fa > 0) else None
     where_area = _area_where(area_level)
-    type_sql = ""
-    pg = _PGROUP_SQL.get(property_type)
-    if pg:
-        type_sql = " AND " + pg
+    tokens = _ptype_tokens(property_type)
+    pt_codes = _ptype_codes(tokens)
+    type_sql = " AND property_type = ANY(%(ptypes)s)" if pt_codes else ""
     params = {"area": area, "recent_start": recent_start, "prior_start": prior_start,
-              "end_excl": end_excl, "cand": cand, "cand_ppsqm": cand_ppsqm,
+              "end_excl": end_excl, "cand": cand, "cand_ppsqm": cand_ppsqm, "ptypes": pt_codes,
               "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_month_tx": 30}
 
     async with conn.cursor(row_factory=dict_row) as cur:
@@ -281,7 +305,7 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
 
         if not rec or not rec["sales_recent"]:
             return {"error": f"No recent sales found for '{area}'"
-                             + (f" ({_PTYPE_FRIENDLY.get(property_type, property_type)})" if pg else "")
+                             + (f" ({_ptype_label(tokens)})" if pt_codes else "")
                              + ". Use a known county (e.g. KENT) or London borough (e.g. BROMLEY); "
                                "for nationwide/budget questions use find_affordable_areas or scan_market."}
 
@@ -396,7 +420,7 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
 
     return {
         "area": area, "area_level": area_level,
-        "property_type": property_type, "property_type_label": _PTYPE_FRIENDLY.get(property_type, property_type),
+        "property_type": property_type, "property_type_label": _ptype_label(tokens),
         "window": {"from": recent_start.isoformat(), "to": end.isoformat()},
         "typical_price_now": median_recent, "recent_sales": rec["sales_recent"],
         "vs_history": {
@@ -569,10 +593,12 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     params = {"budget": budget, "start": start, "end_excl": end + relativedelta(months=1),
               "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 30)),
               "sqm_min": _SQM_MIN, "sqm_max": _SQM_MAX, "min_fa": min_fa, "max_fa": max_fa}
+    tokens = _ptype_tokens(property_type)
+    pt_codes = _ptype_codes(tokens)
     filters = []
-    pg = _PGROUP_SQL.get(property_type)
-    if pg:
-        filters.append(pg)
+    if pt_codes:
+        filters.append("property_type = ANY(%(ptypes)s)")
+        params["ptypes"] = pt_codes
     if tenure in ("freehold", "leasehold"):
         filters.append("tenure = %(tenure)s")
         params["tenure"] = "F" if tenure == "freehold" else "L"
@@ -644,7 +670,7 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     size_on = bool(min_fa or max_fa)
     if not rows:
         applied = ", ".join(
-            x for x in (f"{property_type}s" if pg else None,
+            x for x in (_ptype_label(tokens) if pt_codes else None,
                         tenure if tenure in ("freehold", "leasehold") else None,
                         f"{new_build}-build" if new_build in ("new", "resale") else None)
             if x)
