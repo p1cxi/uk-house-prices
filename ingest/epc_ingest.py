@@ -164,35 +164,41 @@ def _rating(v):
 
 
 def parse_epc_row(row: dict) -> tuple | None:
-    """Map a certificates.csv row (header-keyed) to the _COLS tuple, or None to skip."""
-    lmk = (row.get("LMK_KEY") or "").strip()
+    """Map a certificate row (header-keyed) to the _COLS tuple, or None to skip.
+
+    Handles both the current bulk download (lowercase headers, id = 'certificate_number')
+    and the older API/opendatacommunities format (uppercase, id = 'LMK_KEY'). We lowercase
+    every header so one code path covers both.
+    """
+    r = {(k or "").strip().lower(): v for k, v in row.items()}
+    lmk = (r.get("lmk_key") or r.get("certificate_number") or "").strip()
     if not lmk:
         return None
-    a1, a2, a3 = row.get("ADDRESS1"), row.get("ADDRESS2"), row.get("ADDRESS3")
-    postcode = (row.get("POSTCODE") or "").strip().upper() or None
+    a1, a2, a3 = r.get("address1"), r.get("address2"), r.get("address3")
+    postcode = (r.get("postcode") or "").strip().upper() or None
     norm_pc, paon_number, paon_name, saon_token, norm_street = normalise_epc_address(a1, a2, a3, postcode)
     return (
         lmk,
-        _i(row.get("UPRN")),
-        (row.get("UPRN_SOURCE") or "").strip() or None,
-        (row.get("BUILDING_REFERENCE_NUMBER") or "").strip() or None,
+        _i(r.get("uprn")),
+        (r.get("uprn_source") or "").strip() or None,
+        (r.get("building_reference_number") or "").strip() or None,
         (a1 or "").strip() or None, (a2 or "").strip() or None, (a3 or "").strip() or None,
         postcode,
-        _rating(row.get("CURRENT_ENERGY_RATING")),
-        _i(row.get("CURRENT_ENERGY_EFFICIENCY")),
-        (row.get("PROPERTY_TYPE") or "").strip() or None,
-        (row.get("BUILT_FORM") or "").strip() or None,
-        (row.get("TRANSACTION_TYPE") or "").strip() or None,
-        (row.get("TENURE") or "").strip() or None,
-        _f(row.get("TOTAL_FLOOR_AREA")),
-        _f(row.get("NUMBER_HABITABLE_ROOMS")),
-        _f(row.get("NUMBER_HEATED_ROOMS")),
-        _d(row.get("INSPECTION_DATE")),
-        _d(row.get("LODGEMENT_DATE")),
-        _dt(row.get("LODGEMENT_DATETIME")),
-        (row.get("LOCAL_AUTHORITY") or "").strip() or None,
-        (row.get("CONSTITUENCY") or "").strip() or None,
-        (row.get("COUNTY") or "").strip() or None,
+        _rating(r.get("current_energy_rating")),
+        _i(r.get("current_energy_efficiency")),
+        (r.get("property_type") or "").strip() or None,
+        (r.get("built_form") or "").strip() or None,
+        (r.get("transaction_type") or "").strip() or None,
+        (r.get("tenure") or "").strip() or None,
+        _f(r.get("total_floor_area")),
+        _f(r.get("number_habitable_rooms")),
+        _f(r.get("number_heated_rooms")),
+        _d(r.get("inspection_date")),
+        _d(r.get("lodgement_date")),
+        _dt(r.get("lodgement_datetime")),
+        (r.get("local_authority") or "").strip() or None,
+        (r.get("constituency") or "").strip() or None,
+        (r.get("county") or "").strip() or None,
         norm_pc, paon_number, paon_name, saon_token, norm_street,
     )
 
@@ -237,12 +243,11 @@ class EpcIngestor:
             csv_paths = []
             for dirpath, _, files in os.walk(root_dir):
                 for f in files:
-                    if f.lower() == "certificates.csv":
+                    fl = f.lower()
+                    # 'certificates.csv' (per-LA layout) OR 'certificates-YYYY.csv' (per-year bulk).
+                    # NEVER 'recommendations-*.csv' — different schema, many rows per certificate.
+                    if fl.endswith(".csv") and fl.startswith("certificates"):
                         csv_paths.append(os.path.join(dirpath, f))
-            if not csv_paths:
-                # Fall back: any *.csv directly under root (single-file export).
-                csv_paths = [os.path.join(root_dir, f) for f in os.listdir(root_dir)
-                             if f.lower().endswith(".csv")]
             logger.info("epc bulk load: found certificate files", count=len(csv_paths), root=root_dir)
             for path in sorted(csv_paths):
                 await self._ingest_file(conn, path, batch_size)
