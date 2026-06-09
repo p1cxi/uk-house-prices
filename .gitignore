@@ -72,3 +72,6 @@ postcode_csv/**/*.csv
 # EPC bulk download (GOV.UK One Login, ~5.6GB) — never committed; repo is public
 epc_data/
 uk-house-prices-roadmap.md
+
+# Generated eval specs (dump of current tool wording; not committed)
+evals/specs.current.json
