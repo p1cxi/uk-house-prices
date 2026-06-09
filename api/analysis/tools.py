@@ -52,16 +52,19 @@ TOOLS = [
          "resale (new_build), and property_type (house = detached/semi/terraced, flat, or a specific "
          "type). USE THIS for "
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
-         "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
-         "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
-         "county. Do NOT default to London. Also returns each area's median £/m² (EPC-matched "
+         "'leasehold house under £X'). Set area_scope by geography: 'london' whenever London / "
+         "Greater London / the M25 is mentioned — INCLUDING comparatives ('closer to London', "
+         "'near London', 'around London'); 'county' (+county) for a named county; 'all' (nationwide) "
+         "only when NO place is named. On a follow-up that adds a place (e.g. 'anything closer to "
+         "London?'), re-call with area_scope updated and the earlier filters kept. Also returns "
+         "each area's median £/m² (EPC-matched "
          "sales only — see sqm_match_pct); supports an optional floor-area band "
          "(min_floor_area/max_floor_area, m²) and sort='ppsqm' (rank by cheapest £/m²). Use "
          "sort='ppsqm' for 'cheapest/best value per square metre'. NB: £/m² & size are EPC-matched "
          "only; there is still NO bedroom count (habitable rooms is an approximate proxy, not bedrooms).",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
-               "area_scope": {"type": "string", "enum": ["all", "london", "county"], "default": "all",
-                              "description": "all = nationwide (England & Wales, the default); london = Greater London boroughs (~within M25), use only if the user says London/M25; county = districts in one county (set 'county')"},
+               "area_scope": {"type": "string", "enum": ["all", "london", "county"],
+                              "description": "all = nationwide (England & Wales); london = Greater London boroughs (~within the M25); county = districts of one named county (also set 'county'). REQUIRED — set it explicitly on EVERY call (it has no default): pick 'london' if London/the M25 is mentioned now OR earlier in the conversation, 'county' (+county) for a named county, else 'all'. Never omit it on a follow-up just because a previous call did."},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
@@ -75,7 +78,11 @@ TOOLS = [
                         "description": "ppsqm = rank areas by lowest median £/m² (EPC-matched)"},
                "min_transactions": {"type": "integer", "default": 100, "minimum": 0},
                "limit": {"type": "integer", "default": 12, "minimum": 1, "maximum": 30}},
-              required=["budget"])),
+              # area_scope is REQUIRED (no default): an 8B copies its prior tool_call verbatim on a
+              # follow-up, omitting a defaulted scope ("anything closer to London?" stayed nationwide).
+              # Forcing the field makes the model re-decide each call. Validated in evals/. The Python
+              # handler keeps a default for direct/programmatic callers.
+              required=["budget", "area_scope"])),
 
     Tool("assess_value",
          "Q: 'Is this place — or this asking price — good value or overpriced?' Pass ONE area "
