@@ -101,12 +101,17 @@ def _country_guard(area):
 
 
 def _area_where(area_level: str, param: str = "area") -> str:
+    # HM Land Registry county/district are already stored UPPERCASE (verified: 0 of ~31M rows
+    # are mixed-case), so UPPER() goes on the BOUND PARAM only — never the column. Wrapping the
+    # column (UPPER(county)=...) defeats the plain b-tree idx_transactions_county/_district and
+    # forces a parallel seq scan of the whole transactions table (~6s/query for a London borough);
+    # comparing the raw column lets the planner use the index (bitmap scan, ~5x faster).
     if area_level == "county":
-        return f"UPPER(county) = UPPER(%({param})s)"
+        return f"county = UPPER(%({param})s)"
     if area_level == "district":
-        return f"UPPER(district) = UPPER(%({param})s)"
-    return (f"(UPPER(county) = UPPER(%({param})s) "
-            f"OR (UPPER(county) = 'GREATER LONDON' AND UPPER(district) = UPPER(%({param})s)))")
+        return f"district = UPPER(%({param})s)"
+    return (f"(county = UPPER(%({param})s) "
+            f"OR (county = 'GREATER LONDON' AND district = UPPER(%({param})s)))")
 
 
 def _month_first(d: date) -> date:
@@ -482,8 +487,8 @@ async def _yoy_movers(conn, lcm: date, direction="gainers", min_transactions=50,
               "min_tx": int(min_transactions), "limit": max(1, min(int(limit), 25))}
     sql = f"""
         WITH area_data AS (
-            SELECT CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END AS area,
-                   CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
+            SELECT CASE WHEN county='GREATER LONDON' THEN district ELSE county END AS area,
+                   CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
                    count(*) FILTER (WHERE date >= %(m0)s AND date < %(m1)s) AS transactions,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY price)
                        FILTER (WHERE date >= %(m0)s AND date < %(m1)s) AS cur_med,
@@ -517,12 +522,12 @@ async def _cheapest_areas(conn, lcm: date, area_level="both", min_transactions=1
                     "both": "TRUE"}.get(area_level, "TRUE")
     sql = f"""
         WITH base AS (
-            SELECT CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END AS area,
-                   CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
+            SELECT CASE WHEN county='GREATER LONDON' THEN district ELSE county END AS area,
+                   CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END AS area_level,
                    price
             FROM market_transactions
             WHERE date >= %(start)s AND date < %(end_excl)s
-              AND (UPPER(county) <> 'GREATER LONDON' OR district IS NOT NULL)
+              AND (county <> 'GREATER LONDON' OR district IS NOT NULL)
         )
         SELECT area, area_level, count(*)::int AS recent_transactions,
                percentile_cont(0.5) WITHIN GROUP (ORDER BY price)::bigint AS median
@@ -607,19 +612,22 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
         params["nb"] = "Y" if new_build == "new" else "N"
     seg = "".join(" AND " + f for f in filters)
 
+    # county/district are stored UPPERCASE (see _area_where): compare the raw, indexed column and
+    # UPPER() only the bound param. UPPER(column)=... in a scope_filter would defeat
+    # idx_transactions_county_date and force a seq scan (county/london scopes were ~10x slower).
     if area_scope == "county":
         if not county:
             return {"error": "area_scope='county' requires a 'county' name"}
         area_expr, area_level = "district", "'district'"
-        scope_filter = "UPPER(county) = UPPER(%(county)s) AND district IS NOT NULL"
+        scope_filter = "county = UPPER(%(county)s) AND district IS NOT NULL"
         params["county"] = county
     elif area_scope == "all":
-        area_expr = "CASE WHEN UPPER(county)='GREATER LONDON' THEN district ELSE county END"
-        area_level = "CASE WHEN UPPER(county)='GREATER LONDON' THEN 'district' ELSE 'county' END"
-        scope_filter = "(UPPER(county) <> 'GREATER LONDON' OR district IS NOT NULL)"
+        area_expr = "CASE WHEN county='GREATER LONDON' THEN district ELSE county END"
+        area_level = "CASE WHEN county='GREATER LONDON' THEN 'district' ELSE 'county' END"
+        scope_filter = "(county <> 'GREATER LONDON' OR district IS NOT NULL)"
     else:  # 'london' (~ within the M25)
         area_expr, area_level = "district", "'district'"
-        scope_filter = "UPPER(county) = 'GREATER LONDON' AND district IS NOT NULL"
+        scope_filter = "county = 'GREATER LONDON' AND district IS NOT NULL"
 
     # Rank by cheapest £/m² only over areas with enough EPC matches to be meaningful.
     sqm_having = ("" if sort != "ppsqm" else
