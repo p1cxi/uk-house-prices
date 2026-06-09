@@ -92,6 +92,11 @@ def _budget_route(question: str):
     else:
         ptype = "any"
     args = {"budget": budget, "area_scope": scope, "property_type": ptype, "tenure": tenure}
+    # new-build vs resale, only on an explicit word (don't infer from a bare "new").
+    if re.search(r"\bnew[- ]?builds?\b|\bnewbuild\b", ql):
+        args["new_build"] = "new"
+    elif re.search(r"\b(resale|second[- ]?hand|existing homes?)\b", ql):
+        args["new_build"] = "resale"
     # Optional floor-area size in a budget question ("60-90 m²", "around 70 sqm") — EPC-backed.
     rng = _SIZE_RANGE_RE.search(ql)
     if rng:
@@ -119,8 +124,8 @@ Rules — match the user's intent to ONE tool:
 - BUDGET / "what can I afford" / "where does £X go" / "best value for my money" / "under £X":
   find_affordable_areas. Set area_scope by geography: 'london' for London / "within the M25";
   'county' (+county) for a named county; 'all' for nationwide / "England" / "UK" / "anywhere".
-  Pass property_type ('house'/'flat'/a specific type) and tenure ('freehold'/'leasehold') only
-  when the user names them; otherwise leave them 'any'.
+  Pass property_type ('house'/'flat'/a specific type), tenure ('freehold'/'leasehold') and new_build
+  ('new' for new-builds, 'resale' for existing/second-hand) only when the user names them; otherwise 'any'.
 - "Is X good value / overpriced?", "am I overpaying?", "is £Y for a <type> in <area> fair?":
   assess_value. Pass the specific area; add candidate_price (+property_type) when the user names a
   price/type. Needs a SPECIFIC county or London borough — never a country/region.
@@ -155,11 +160,16 @@ Rules:
   one (vs_sqm / median_ppsqm), and ALWAYS state it's from EPC-matched sales with the coverage (e.g.
   "£/m² based on ~68% of recent sales"). If the figure is null or coverage.trustworthy is false, DO NOT
   report £/m² — give the price-based value answer (history / peers / local percentile) and say £/m²
-  isn't reliable enough here. Never invent or extrapolate a £/m² or floor area.
+  isn't reliable enough here. Never invent or extrapolate a £/m² or floor area. Floor-area quartiles
+  (q1/median/q3) describe the SIZE SPREAD (e.g. "a quarter of homes are under {q1} m²") — still not bedrooms.
 - BEDROOMS ARE NOT IN THE DATA: EPC gives "habitable rooms" (living rooms + kitchen + bedrooms), NOT a
   bedroom count. You may mention habitable rooms as an APPROXIMATE size proxy, explicitly noting it is
   not the bedroom count, but NEVER claim results are filtered by bedrooms or imply an exact bedroom match.
-- ENERGY RATING: if an energy rating is provided, you may note it as a running-cost / EPC-C signal.
+- ENERGY: if an energy block is provided, you may cite the typical rating AND the band distribution
+  (especially "% EPC-D or worse") as a running-cost / future-efficiency-rule exposure signal — it's a
+  stock proxy, not the specific property's own rating.
+- NEW-BUILD: if a new_build block is provided, you may report the new-build vs resale medians and the
+  premium %, but note the gap reflects spec/age/size mix, not a like-for-like uplift on the same home.
 - {caveat}"""
 
 CAVEAT_ON = ("One or more figures cover a very recent month; HM Land Registry data is registered with a lag, "

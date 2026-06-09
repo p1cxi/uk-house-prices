@@ -22,7 +22,25 @@ from starlette.routing import Mount
 
 from .analysis.tools import REGISTRY, call_tool
 
-server = Server("uk-house-prices-analytics")
+# Honesty / data-currency directives surfaced to the model in the MCP initialize handshake.
+# The /ask path enforces these in its synthesiser; the MCP path has no synthesiser (the client
+# model composes the answer directly), so without this the model never volunteers the data-lag
+# caveat and may treat incomplete recent months or thin EPC coverage as solid.
+_INSTRUCTIONS = """These tools query HM Land Registry SOLD prices for England & Wales, 1995-present \
+(no rentals, no current asking prices, no forecasts). When answering from their results:
+- DATA CURRENCY: each result carries meta.last_complete_month — the latest fully-registered month. \
+State that figures are current to that month, and note HM Land Registry registers sales with a ~2-3 \
+month lag, so more recent months are incomplete and will rise. Do not present an incomplete recent \
+month as a settled figure.
+- £/m², FLOOR AREA & ENERGY come from EPC-matched sales only (PARTIAL coverage). Report a £/m² or size \
+figure ONLY when the result supplies it, and always state the match % (e.g. "based on ~68% of recent \
+sales"). If a result omits these or marks coverage untrustworthy, give the price-based answer and say \
+£/m² isn't reliable there — never fabricate one.
+- BEDROOMS ARE NOT IN THE DATA: EPC "habitable rooms" is an approximate size proxy, NOT a bedroom count. \
+Never filter by or claim an exact bedroom count.
+- Cite only numbers present in the tool results; never invent or estimate a figure."""
+
+server = Server("uk-house-prices-analytics", instructions=_INSTRUCTIONS)
 
 
 @server.list_tools()

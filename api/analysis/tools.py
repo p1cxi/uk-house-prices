@@ -48,8 +48,9 @@ TOOLS = [
          "Q: 'Does £X fit, and where does my money go furthest?' Given a BUDGET, returns per "
          "area the % of recent sales within budget (the budget's percentile = the value signal — "
          "higher means your money buys a more typical/better home there), the median + flat "
-         "median, and whether the median fits. Filter by tenure (freehold/leasehold) and "
-         "property_type (house = detached/semi/terraced, flat, or a specific type). USE THIS for "
+         "median, and whether the median fits. Filter by tenure (freehold/leasehold), new-build vs "
+         "resale (new_build), and property_type (house = detached/semi/terraced, flat, or a specific "
+         "type). USE THIS for "
          "any budget question ('on £200k', 'what can I afford', 'best value for my money', "
          "'leasehold house under £X'). area_scope defaults to 'all' (nationwide) — set 'london' "
          "ONLY when the user names London / 'within the M25', or 'county' (+county) for a named "
@@ -64,6 +65,8 @@ TOOLS = [
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
+               "new_build": {"type": "string", "enum": ["any", "new", "resale"], "default": "any",
+                             "description": "new = new-build only; resale = existing/second-hand only"},
                "min_floor_area": {"type": "number", "minimum": 10,
                                   "description": "optional min total floor area in m² (EPC-matched sales only)"},
                "max_floor_area": {"type": "number", "minimum": 10,
@@ -82,9 +85,11 @@ TOOLS = [
          "national typical for that type), where that price sits in the LOCAL distribution (its "
          "percentile if candidate_price given), AND £/m² (EPC-matched sales): the area's median "
          "£/m² vs national, plus the candidate's own £/m² if you pass candidate_floor_area. Also "
-         "reports the area's typical energy rating. USE THIS for 'is X good value?', 'am I "
-         "overpaying?', 'is £350k for a 70 m² flat in Bromley fair?', '£ per m² in Bromley?'. £/m² "
-         "is EPC-matched-only (coverage reported, suppressed if too thin); bedroom counts are not available.",
+         "reports the new-build vs resale premium, the EPC energy-band distribution (incl. % EPC-D "
+         "or worse, a running-cost / efficiency-rule signal) and the floor-area spread (quartiles). "
+         "USE THIS for 'is X good value?', 'am I overpaying?', 'is £350k for a 70 m² flat in Bromley "
+         "fair?', '£ per m² in Bromley?', 'new-build premium in X?', 'how energy-efficient is X?'. £/m², "
+         "size & energy are EPC-matched-only (coverage reported, suppressed if too thin); no bedroom counts.",
          _obj({"area": {"type": "string", "description": "a county (e.g. KENT) or London borough (e.g. BROMLEY)"},
                "area_level": _AREA_LEVEL,
                "property_type": _PTYPE_GROUP,
@@ -116,7 +121,10 @@ TOOLS = [
          "Escape hatch: run a single read-only SELECT against the schema for questions "
          "the other tools don't cover (e.g. grouping by postcode/outcode). Tables: "
          "transactions, postcodes, market_transactions (clean view), market_transactions_epc "
-         "(adds EPC floor area / price_per_sqm / energy rating, partial coverage), monthly_price_stats.",
+         "(adds EPC floor area / price_per_sqm / energy rating, partial coverage), monthly_price_stats. "
+         "GROUP BY dimensions: district, county, town, property_type, tenure, new_build on the "
+         "transaction views; region via JOIN postcodes USING (postcode); EPC local_authority / "
+         "constituency live on epc_property / epc_certificates (keyed by uprn or norm_postcode).",
          _obj({"sql": {"type": "string"}, "max_rows": {"type": "integer", "minimum": 1}},
               required=["sql"]),
          timeout_ms=_RUN_SQL_TIMEOUT_MS),
@@ -139,6 +147,10 @@ _HANDLERS = {
 _ENUM_ALIASES = {
     "semi-detached": "semi", "semidetached": "semi", "terrace": "terraced",
     "apartment": "flat", "flats": "flat", "houses": "house",
+    # new_build (find_affordable_areas)
+    "new build": "new", "new-build": "new", "newbuild": "new", "newbuilds": "new", "new builds": "new",
+    "existing": "resale", "second-hand": "resale", "secondhand": "resale", "second hand": "resale",
+    "older": "resale",
 }
 
 
