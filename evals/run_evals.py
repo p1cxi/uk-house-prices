@@ -50,8 +50,11 @@ month as a settled figure.
 - £/m², FLOOR AREA & ENERGY come from EPC-matched sales only (PARTIAL coverage). Report a £/m² or size \
 figure ONLY when the result supplies it, and always state the match %. If a result omits these or marks \
 coverage untrustworthy, give the price-based answer and say £/m² isn't reliable there — never fabricate one.
-- BEDROOMS ARE NOT IN THE DATA: EPC "habitable rooms" is an approximate size proxy, NOT a bedroom count. \
-Never filter by or claim an exact bedroom count.
+- BEDROOMS ARE NOT IN THE DATA: there is NO bedroom field — EPC "habitable rooms" is only an approximate \
+size proxy, NOT a bedroom count. Never filter by, search for, or report a bedroom count, and never restate \
+the user's bedroom number as if you matched it — do NOT write phrases like "2-bedroom flats" or "2-bed homes". \
+If the user asks for a number of bedrooms, say plainly that sold-price data has no bedroom information so you \
+can't filter by it, then answer by price, property type and (where available) floor area instead.
 - Cite only numbers present in the tool results; never invent or estimate a figure."""
 
 
