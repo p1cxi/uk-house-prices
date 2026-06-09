@@ -193,8 +193,12 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
       • vs PEERS: the area's median vs the national typical for that property type;
       • vs the LOCAL distribution: a candidate_price's percentile among recent local sales;
       • vs £/m² (EPC-matched sales only, coverage permitting): the area's median £/m² vs national,
-        and — given candidate_floor_area — the candidate's own £/m² and where it sits locally.
-    £/m² is suppressed (price-only answer) when too few sales here are EPC-matched to trust."""
+        and — given candidate_floor_area — the candidate's own £/m² and where it sits locally;
+      • new-build vs resale: the median for each (and the new-build premium %) within this area+type;
+      • energy: the EPC-band distribution (incl. % EPC-D or worse) + typical rating;
+      • size spread: floor-area quartiles (Q1/median/Q3) and typical habitable rooms (a size proxy).
+    £/m², size and energy come from EPC-matched sales only and are suppressed (price-only answer)
+    when too few sales here are EPC-matched to trust; the new-build premium uses full coverage."""
     guard = _country_guard(area)
     if guard:
         return guard
@@ -246,7 +250,30 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                                AND price_per_sqm IS NOT NULL AND price_per_sqm <= %(cand_ppsqm)s::int
                                AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)
                     / NULLIF(count(*) FILTER (WHERE date >= %(recent_start)s AND price_per_sqm IS NOT NULL
-                               AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s), 0), 1) AS candidate_sqm_pctile
+                               AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s), 0), 1) AS candidate_sqm_pctile,
+              -- new-build vs resale (price premium within this area+type, recent window)
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY price)
+                  FILTER (WHERE date >= %(recent_start)s AND new_build = 'Y')::bigint AS median_new,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY price)
+                  FILTER (WHERE date >= %(recent_start)s AND new_build = 'N')::bigint AS median_resale,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND new_build = 'Y')::int AS sales_new,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND new_build = 'N')::int AS sales_resale,
+              -- floor-area spread (EPC-matched, sanity band): quartiles around the median
+              percentile_cont(0.25) WITHIN GROUP (ORDER BY total_floor_area)
+                  FILTER (WHERE date >= %(recent_start)s
+                          AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::numeric AS floor_area_q1,
+              percentile_cont(0.75) WITHIN GROUP (ORDER BY total_floor_area)
+                  FILTER (WHERE date >= %(recent_start)s
+                          AND total_floor_area BETWEEN %(sqm_min)s AND %(sqm_max)s)::numeric AS floor_area_q3,
+              -- EPC energy-band distribution of rated EPC-matched recent sales (running-cost / EPC-C exposure)
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating IS NOT NULL)::int AS rated_recent,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'A')::int AS er_a,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'B')::int AS er_b,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'C')::int AS er_c,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'D')::int AS er_d,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'E')::int AS er_e,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'F')::int AS er_f,
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'G')::int AS er_g
             FROM {_EPC_VIEW}
             WHERE {where_area} AND date >= %(prior_start)s AND date < %(end_excl)s{type_sql}
         """, params)
@@ -306,7 +333,43 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
                    if (sqm_trust and area_ppsqm and peer_ppsqm) else None)
     median_floor_area = float(rec["median_floor_area"]) if rec["median_floor_area"] else None
     median_rooms = float(rec["median_habitable_rooms"]) if rec["median_habitable_rooms"] else None
+    fa_q1 = float(rec["floor_area_q1"]) if rec["floor_area_q1"] else None
+    fa_q3 = float(rec["floor_area_q3"]) if rec["floor_area_q3"] else None
     typical_rating = rec["typical_rating"]
+
+    # New-build vs resale premium (within this area+type; full coverage, not EPC-gated).
+    median_new, median_resale = rec["median_new"], rec["median_resale"]
+    sales_new, sales_resale = rec["sales_new"] or 0, rec["sales_resale"] or 0
+    new_block = None
+    if sales_new >= 10 and sales_resale >= 10 and median_new and median_resale:
+        new_block = {
+            "new_build_median": median_new, "resale_median": median_resale,
+            "premium_pct": round(100.0 * (median_new - median_resale) / median_resale, 1),
+            "new_build_share_pct": round(100.0 * sales_new / (sales_new + sales_resale), 1),
+            "new_build_sales": sales_new, "resale_sales": sales_resale,
+            "note": "new-build vs resale median for this area+type; the gap reflects spec/age/size mix, "
+                    "not a like-for-like uplift on the same home.",
+        }
+
+    # Energy-band distribution — gated on its own (rating) coverage, not the floor-area coverage.
+    rated = rec["rated_recent"] or 0
+    er_pct, er_trust = _coverage(rated, rec["sales_recent"])
+    energy_block = None
+    if er_trust and typical_rating:
+        bands = {"A": rec["er_a"], "B": rec["er_b"], "C": rec["er_c"], "D": rec["er_d"],
+                 "E": rec["er_e"], "F": rec["er_f"], "G": rec["er_g"]}
+        c_or_better = bands["A"] + bands["B"] + bands["C"]
+        d_or_worse = bands["D"] + bands["E"] + bands["F"] + bands["G"]
+        energy_block = {
+            "typical_rating": typical_rating,
+            "rated_sales": rated, "match_pct": er_pct,
+            "distribution_pct": {k: round(100.0 * v / rated, 1) for k, v in bands.items()},
+            "pct_epc_c_or_better": round(100.0 * c_or_better / rated, 1),
+            "pct_epc_d_or_worse": round(100.0 * d_or_worse / rated, 1),
+            "note": "EPC ratings of recent EPC-matched sales (A=most efficient … G=least). "
+                    "'% EPC-D or worse' is a running-cost / future-efficiency-rule exposure signal — "
+                    "a stock proxy, not the candidate's own rating.",
+        }
 
     candidate = None
     if cand is not None:
@@ -357,6 +420,8 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
             "national_ppsqm": peer_ppsqm if sqm_trust else None,
             "ratio_to_national_ppsqm": ppsqm_ratio,
             "median_floor_area_m2": round(median_floor_area) if (sqm_trust and median_floor_area) else None,
+            "floor_area_q1_m2": round(fa_q1) if (sqm_trust and fa_q1) else None,   # 25% of homes smaller
+            "floor_area_q3_m2": round(fa_q3) if (sqm_trust and fa_q3) else None,   # 25% larger
             "typical_habitable_rooms": median_rooms if sqm_trust else None,  # size proxy, NOT bedrooms
             "verdict": _band(ppsqm_ratio, 0.85, 1.15, "cheaper per m² than the national typical",
                              "around the national typical per m²", "pricier per m² than the national typical")
@@ -364,10 +429,8 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
             "coverage": {"matched_sales": sqm_matched, "recent_sales": rec["sales_recent"],
                          "match_pct": sqm_pct, "trustworthy": sqm_trust},
         },
-        "energy": ({"typical_rating": typical_rating,
-                    "note": "modal EPC rating of recent EPC-matched sales (A=most efficient … G=least); "
-                            "a proxy for running costs and EPC-C upgrade exposure, not the candidate's own rating."}
-                   if (sqm_trust and typical_rating) else None),
+        "energy": energy_block,
+        "new_build": new_block,
         "candidate": candidate,
         "data_note": ("Relative value (the area's own history, national peers, the local price "
                       "distribution)"
@@ -483,19 +546,21 @@ async def scan_market(conn, focus="falling", area_level="both", limit=12):
 
 
 async def find_affordable_areas(conn, budget, area_scope="all", county=None,
-                                property_type="any", tenure="any",
+                                property_type="any", tenure="any", new_build="any",
                                 min_floor_area=None, max_floor_area=None,
                                 sort="affordability", min_transactions=100, limit=12):
     """Given a BUDGET, find where it actually buys (and where it goes furthest = best value).
     Per area: % of recent sales within budget (the value signal), the median (and flat median),
     whether the median fits, AND the median £/m² from EPC-matched sales. Filterable by
-    property_type (house/flat/specific) and tenure (freehold/leasehold). An OPTIONAL floor-area
+    property_type (house/flat/specific), tenure (freehold/leasehold) and new_build (new/resale).
+    An OPTIONAL floor-area
     band (min/max m²) adds matched-only size-aware figures WITHOUT shrinking the headline budget
     answer (which stays over all sales). sort='ppsqm' ranks areas by cheapest median £/m².
     Uses ABSOLUTE price vs budget. NB: £/m² and size come from EPC-matched sales only (partial
     coverage); habitable rooms is an approximate size proxy, NOT a bedroom count."""
     budget = int(budget)
     sort = "ppsqm" if str(sort).lower() == "ppsqm" else "affordability"
+    new_build = str(new_build).lower() if new_build else "any"
     min_fa = float(min_floor_area) if min_floor_area else None
     max_fa = float(max_floor_area) if max_floor_area else None
     lcm = await _last_complete_month(conn)
@@ -511,6 +576,9 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     if tenure in ("freehold", "leasehold"):
         filters.append("tenure = %(tenure)s")
         params["tenure"] = "F" if tenure == "freehold" else "L"
+    if new_build in ("new", "resale"):
+        filters.append("new_build = %(nb)s")
+        params["nb"] = "Y" if new_build == "new" else "N"
     seg = "".join(" AND " + f for f in filters)
 
     if area_scope == "county":
@@ -576,7 +644,7 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
     size_on = bool(min_fa or max_fa)
     return {
         "budget": budget, "area_scope": area_scope, "sort": sort,
-        "property_type": property_type, "tenure": tenure,
+        "property_type": property_type, "tenure": tenure, "new_build": new_build,
         "size_filter": {"min_m2": min_fa, "max_m2": max_fa} if size_on else None,
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "any_area_median_within_budget": any_fit,
