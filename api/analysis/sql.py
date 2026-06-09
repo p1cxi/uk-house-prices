@@ -694,6 +694,11 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
                 "types, a wider area_scope, or areas outside this scope.")
     else:
         note = None
+    # 'london' ≈ Greater London, not a literal M25 boundary — surfaced so the answer stays honest.
+    scope_note = ("'london' = Greater London's boroughs — the closest available proxy for 'the M25' / "
+                  "'around London', NOT a literal M25 boundary (it omits inside-M25 parts of Surrey, "
+                  "Kent, Essex and Herts, and includes some outer-borough land beyond the motorway)."
+                  if area_scope == "london" else None)
     return {
         "budget": budget, "area_scope": area_scope, "sort": sort,
         "property_type": property_type, "tenure": tenure, "new_build": new_build,
@@ -701,6 +706,7 @@ async def find_affordable_areas(conn, budget, area_scope="all", county=None,
         "window": {"from": start.isoformat(), "to": end.isoformat()},
         "any_area_median_within_budget": any_fit,
         "note": note,
+        "scope_note": scope_note,
         "data_note": ("'pct_within_budget' is the budget's percentile across ALL sales (full "
                       "coverage) for the chosen type+tenure — higher = your money buys a more "
                       "typical/better home there. 'median_ppsqm' and any size-band figures "

@@ -69,7 +69,7 @@ TOOLS = [
          "only; there is still NO bedroom count (habitable rooms is an approximate proxy, not bedrooms).",
          _obj({"budget": {"type": "integer", "minimum": 1000, "description": "max purchase price in GBP"},
                "area_scope": {"type": "string", "enum": ["all", "london", "county"],
-                              "description": "all = nationwide (England & Wales); london = Greater London boroughs (~within the M25); county = districts of one named county (also set 'county'). REQUIRED — set it explicitly on EVERY call (it has no default): pick 'london' if London/the M25 is mentioned now OR earlier in the conversation, 'county' (+county) for a named county, else 'all'. Never omit it on a follow-up just because a previous call did."},
+                              "description": "all = nationwide (England & Wales); london = Greater London's boroughs (the closest proxy for 'the M25'/'around London', NOT a literal M25 boundary); county = districts of one named county (also set 'county'). REQUIRED — set it explicitly on EVERY call (it has no default): pick 'london' if London/the M25 is mentioned now OR earlier in the conversation, 'county' (+county) for a named county, else 'all'. Never omit it on a follow-up just because a previous call did."},
                "county": {"type": "string", "description": "county name; required when area_scope='county'"},
                "property_type": _PTYPE_GROUP,
                "tenure": {"type": "string", "enum": ["any", "freehold", "leasehold"], "default": "any"},
