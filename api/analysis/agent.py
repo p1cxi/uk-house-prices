@@ -131,6 +131,7 @@ Rules — match the user's intent to ONE tool:
   Pass property_type as a LIST of one or more types (e.g. ['flat'] or ['flat','terraced'] for "flats or
   terraced houses"), tenure ('freehold'/'leasehold') and new_build ('new'/'resale') only when the user
   names them; otherwise leave them at their defaults (['any'] / 'any').
+  'london' = Greater London (the closest proxy for "the M25", not a literal boundary).
 - "Is X good value / overpriced?", "am I overpaying?", "is £Y for a <type> in <area> fair?":
   assess_value. Pass the specific area; add candidate_price (+property_type) when the user names a
   price/type. Needs a SPECIFIC county or London borough — never a country/region.
