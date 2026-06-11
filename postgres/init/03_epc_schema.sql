@@ -128,11 +128,15 @@ SELECT p.transaction_id,
        CASE WHEN e.total_floor_area > 0
             THEN ROUND(p.price / e.total_floor_area)::int END AS price_per_sqm,
        e.method                                      AS match_method,
-       e.confidence                                  AS match_confidence
+       e.confidence                                  AS match_confidence,
+       e.property_type                               AS epc_property_type,  -- House/Bungalow/Flat/Maisonette
+       e.built_form,                                                        -- Detached/Semi/Mid-Terrace/...
+       e.current_energy_efficiency                                          -- SAP score 1..100 (numeric)
 FROM ppd p
 CROSS JOIN LATERAL (
     SELECT cand.latest_lmk_key, cand.total_floor_area, cand.number_habitable_rooms,
-           cand.current_energy_rating, cand.method, cand.confidence
+           cand.current_energy_rating, cand.method, cand.confidence,
+           cand.property_type, cand.built_form, cand.current_energy_efficiency
     FROM (
         SELECT ep.*, 'postcode_paon_num_saon' AS method, 0.95 AS confidence, 1 AS prio
           FROM epc_property ep
@@ -195,7 +199,10 @@ SELECT mt.*,
        te.current_energy_rating,
        te.price_per_sqm,
        te.match_method,
-       te.match_confidence
+       te.match_confidence,
+       te.epc_property_type,          -- EPC's own type (House/Bungalow/Flat/Maisonette); distinct from PPD property_type
+       te.built_form,                 -- Detached/Semi-Detached/Mid-Terrace/End-Terrace/...
+       te.current_energy_efficiency   -- numeric SAP score (1..100); current_energy_rating is the A..G band
 FROM market_transactions mt
 LEFT JOIN transaction_epc te ON te.transaction_id = mt.transaction_id;
 
