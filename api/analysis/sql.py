@@ -302,7 +302,9 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
               count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'D')::int AS er_d,
               count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'E')::int AS er_e,
               count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'F')::int AS er_f,
-              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'G')::int AS er_g
+              count(*) FILTER (WHERE date >= %(recent_start)s AND current_energy_rating = 'G')::int AS er_g,
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY current_energy_efficiency)
+                  FILTER (WHERE date >= %(recent_start)s AND current_energy_efficiency IS NOT NULL)::int AS median_sap
             FROM {_EPC_VIEW}
             WHERE {where_area} AND date >= %(prior_start)s AND date < %(end_excl)s{type_sql}
         """, params)
@@ -391,13 +393,14 @@ async def assess_value(conn, area, area_level="auto", property_type="any", candi
         d_or_worse = bands["D"] + bands["E"] + bands["F"] + bands["G"]
         energy_block = {
             "typical_rating": typical_rating,
+            "median_sap_score": rec["median_sap"],   # numeric SAP/EER 1..100 (higher = more efficient)
             "rated_sales": rated, "match_pct": er_pct,
             "distribution_pct": {k: round(100.0 * v / rated, 1) for k, v in bands.items()},
             "pct_epc_c_or_better": round(100.0 * c_or_better / rated, 1),
             "pct_epc_d_or_worse": round(100.0 * d_or_worse / rated, 1),
-            "note": "EPC ratings of recent EPC-matched sales (A=most efficient … G=least). "
-                    "'% EPC-D or worse' is a running-cost / future-efficiency-rule exposure signal — "
-                    "a stock proxy, not the candidate's own rating.",
+            "note": "EPC ratings of recent EPC-matched sales (A=most efficient … G=least; median_sap_score "
+                    "is the numeric 1-100 efficiency). '% EPC-D or worse' is a running-cost / "
+                    "future-efficiency-rule exposure signal — a stock proxy, not the candidate's own rating.",
         }
 
     candidate = None
