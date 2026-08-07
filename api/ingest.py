@@ -1,12 +1,13 @@
+from datetime import date
+
 import psycopg
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
-from datetime import date
+from pipelines.epc import EpcIngestor
+from pipelines.ppd import LandRegistryIngestor
 
-from .config import DB_CONFIG  # noqa: F401 — also triggers sys.path setup for ingest import
+from .config import DB_CONFIG
 from .state import _summary_cache, jobs
-from ingest import LandRegistryIngestor
-from epc_ingest import EpcIngestor
 
 router = APIRouter()
 
