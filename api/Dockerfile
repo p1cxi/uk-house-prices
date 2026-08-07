@@ -8,7 +8,9 @@ COPY ingest/requirements.txt /tmp/ingest-requirements.txt
 COPY api/requirements.txt /tmp/api-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/ingest-requirements.txt -r /tmp/api-requirements.txt
 
-COPY ingest/ /app/
+# The api container only needs the pipelines package (imported by api/ingest.py
+# via `from pipelines.ppd import ...`), not the ingest container's CLI shims.
+COPY ingest/pipelines/ /app/pipelines/
 COPY api/ /api/
 
 ENV PYTHONPATH=/app
